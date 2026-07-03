@@ -23,6 +23,7 @@ The product replaces a manual workflow the operator already performs:
 - Use agents from different companies/providers by default for genuinely different model behavior.
 - Use the primary agent's sub-agent as a degraded fallback when an external participant is unavailable.
 - Let both agents browse the repo directly within the same read-only scope.
+- Let both agents gather web context through the same shared read-only web scope when web access is explicitly enabled.
 - Keep the session local, bounded, inspectable, and resumable.
 - Default to compact live output, with quiet and verbose modes.
 - Produce a final artifact that a human or downstream tool can act on.
@@ -35,6 +36,7 @@ The product replaces a manual workflow the operator already performs:
 - Do not require live human participation by default.
 - Do not force disagreement when agents genuinely have no material pushback.
 - Do not guarantee that every agent reads exactly the same files in the same order.
+- Do not allow provider-native web browsing or repo tools that the orchestrator cannot observe or constrain.
 - Do not build a hosted service, queue, or web UI in v1.
 
 ## User Flow
@@ -71,6 +73,8 @@ converge-loop run --artifact plan.md --focus "Ask for better ideas and pushback"
 converge-loop run --scope working-tree --output verbose
 converge-loop run --background --artifact plan.md
 converge-loop status
+converge-loop status <session-id>
+converge-loop resume <session-id>
 converge-loop result <session-id>
 converge-loop cancel <session-id>
 ```
@@ -82,6 +86,7 @@ Useful `run` options:
 - `--artifact <path>`: specific artifact to discuss.
 - `--scope none|working-tree|branch`: repo scope available to both participants; default is `working-tree`.
 - `--base <ref>`: base ref for branch-scope material.
+- `--web off|shared`: web scope available to both participants; default is `off`.
 - `--focus <text>`: narrow the discussion.
 - `--agents codex,claude`: select participant adapters.
 - `--roles proposer,critic`: select stance for each participant.
@@ -97,9 +102,27 @@ Useful `run` options:
 
 `--intervene` is foreground-only. If combined with `--background`, the command fails fast with a validation error. Without `--intervene`, operator questions are recorded as output instead of interrupting the run.
 
-`converge-loop run` requires at least one of `--topic`, `--context`, `--artifact`, or a non-empty selected repo scope. With the default `--scope working-tree`, a clean tree and no topic/context/artifact is invalid input: the command should ask for a topic, artifact, context, or branch/base scope.
+`converge-loop run` requires at least one of `--topic`, `--context`, `--artifact`, a non-empty selected repo scope, or `--web shared` with a topic/focus that asks for external evidence. With the default `--scope working-tree`, a clean tree and no topic/context/artifact is invalid input: the command should ask for a topic, artifact, context, branch/base scope, or explicit web-backed research topic.
 
-Background runs print a session id immediately so the operator can call `converge-loop status`, `converge-loop result <session-id>`, or `converge-loop cancel <session-id>`.
+`--scope branch` requires `--base <ref>`. If omitted, the command fails before launching participants with a clear validation error. `--artifact` and `--context` must exist, be readable files, and resolve inside the current working directory unless an absolute path is supplied intentionally. Missing or unreadable paths are invalid input.
+
+`converge-loop status` without an id lists recent active and terminal sessions. `converge-loop status <session-id>` shows one session. Background runs print a session id immediately so the operator can call `converge-loop status <session-id>`, `converge-loop result <session-id>`, `converge-loop resume <session-id>`, or `converge-loop cancel <session-id>`.
+
+## Command Runtime and Plugin Wiring
+
+The v1 runtime is a Node.js ESM CLI packaged inside the plugin:
+
+- `package.json` declares `"type": "module"` and a `bin` entry: `"converge-loop": "./scripts/bin/converge-loop.mjs"`.
+- `scripts/bin/converge-loop.mjs` is the only public executable. It parses top-level commands and dispatches to runtime modules under `scripts/lib/`.
+- `scripts/lib/cli.mjs` owns argument parsing and validation.
+- `scripts/lib/orchestrator.mjs` owns the turn loop.
+- `scripts/lib/adapters/*.mjs` own participant launch/invocation.
+- `scripts/lib/state-store.mjs` owns session persistence and background job metadata.
+- `skills/converge-loop/SKILL.md` is a guidance surface that tells Codex when and how to invoke the CLI; it is not the runtime and must not implement orchestration in prose.
+
+The `.codex-plugin/plugin.json` manifest continues to expose `skills` because the current plugin surface discovers skills. The command itself is exposed through the package binary and script path. If future Codex plugin manifests add first-class command entries, this plan can add a manifest pointer without changing the runtime contract.
+
+The first implementation slice must create the package metadata, bin wrapper, command parser, and no-provider fake adapter path before any real provider adapter is added. That keeps command wiring testable without live model credentials.
 
 ## Participants
 
@@ -121,36 +144,77 @@ When `--agents` and `--roles` are both supplied, they bind positionally: `agents
 
 The data model should use participant arrays so future versions can support more than two agents without a schema break, but v1 should focus on two.
 
-## Repo Browsing Model
+## File and Web Browsing Model
 
-Both participants may browse the repo directly in v1, but under the same constraints:
+Both participants may browse files and, when enabled, web sources in v1, but under the same constraints:
 
 - Same working directory.
-- Same selected scope.
+- Same selected file scope.
+- Same selected web scope.
 - Same read-only permissions.
-- Same allowed read/search tools.
+- Same allowed read/search/fetch tools.
 - Same transcript visibility.
 - Same max-turn, timeout, and tool-use budgets.
 
 The risk is not that agents read files. The risk is that one agent gets broader authority or different evidence and the result pretends to be a symmetric debate. The product should solve that with equal scope plus an evidence ledger, not by preventing direct browsing.
 
-Each participant turn must include an evidence summary when it relied on repo material:
+File scope is controlled by `--scope`:
+
+- `none`: no repo file access beyond explicitly supplied `--context` or `--artifact`.
+- `working-tree`: read/search access to the current worktree, including uncommitted changes, with writes denied.
+- `branch`: read/search access to the diff and relevant files between `--base` and `HEAD`; `--base` is required.
+
+Web scope is controlled by `--web`:
+
+- `off`: no web/search/fetch tools are available to either participant. Provider-native web features must be disabled or the adapter cannot participate.
+- `shared`: both participants use the same orchestrator-provided web search/fetch tool with the same query limits, URL allow/deny policy, timeout, and evidence logging. Provider-native web features remain disabled so one provider cannot silently use broader web access.
+
+If one adapter cannot support the same file or web scope as the other, the orchestrator either downgrades both participants to the shared subset when the operator did not explicitly request the unavailable scope, or stops as `blocked` when the requested scope cannot be honored symmetrically.
+
+Each participant turn must include an evidence summary when it relied on repo or web material:
 
 - files read or searched
+- web queries run or URLs fetched
 - symbols, tests, or docs consulted
-- important file/line citations when available
+- important file/line citations or URL citations when available
 - evidence gaps or requested follow-up reads
 
 The evidence ledger has two layers:
 
-- Observed tool-use metadata captured by the orchestrator whenever the adapter exposes read/search calls.
-- Participant-reported evidence summaries for adapters that cannot expose every read/search call.
+- Observed tool-use metadata captured by the orchestrator for file read/search calls and web search/fetch calls.
+- Participant-reported evidence summaries for adapters that cannot expose every read/search/fetch call.
 
-Observed metadata is the stronger source and should include file paths, search patterns, and read ranges when available. Participant-reported summaries are still useful, but they do not prove the agent disclosed every file it considered. The final result must distinguish observed evidence from self-reported evidence so the operator understands the residual asymmetry risk.
+Observed metadata is the stronger source and should include file paths, search patterns, read ranges, web queries, fetched URLs, HTTP status, fetch timestamp, and content hash when available. Participant-reported summaries are still useful, but they do not prove the agent disclosed every source it considered. The final result must distinguish observed evidence from self-reported evidence so the operator understands the residual asymmetry risk.
 
 The orchestrator records evidence in each turn record in `turns.jsonl`, includes it in the transcript, and shows it to the other participant on the next turn. `turns.jsonl` is the per-turn source of truth; `evidence-ledger.jsonl` is the aggregated derived view optimized for status/result display and downstream tools. This gives both agents the opportunity to inspect, challenge, or reinterpret cited evidence without requiring the orchestrator to proxy every read.
 
-If one adapter cannot support the same read-only scope as the other, the orchestrator either downgrades both participants to the shared subset or stops as `blocked`.
+## Read-Only Enforcement
+
+The runtime has three adapter classes, and each class must prove read-only enforcement before it can participate:
+
+- `tool-proxy` adapters for hosted APIs. The model receives only orchestrator-provided tools. The allowlist contains file read/search and optional shared web search/fetch. It never contains write, patch, shell, commit, network-fetch outside the shared web tool, or nested-agent tools. Per-call timeouts are enforced by the orchestrator.
+- `local-cli` adapters for local agent CLIs. The subprocess is launched with the strongest supported read-only controls for that CLI plus an OS-level execution guard when available. The adapter must deny patch/write/commit/delegation tools, pass the selected working directory, set turn timeouts, and run preflight checks that prove the requested read-only/sandbox flags are supported. If a CLI cannot prove these controls, it cannot participate.
+- `primary-sub-agent` fallback adapters. The host launches the fallback through a restricted prompt/tool configuration equivalent to the active participant allowlist. If the host cannot disable write/patch/commit/delegation tools for the fallback, fallback is unavailable and the session stops as `blocked` rather than silently widening authority.
+
+Every adapter declares capabilities before a run:
+
+```json
+{
+  "adapter": "codex",
+  "provider": "openai",
+  "class": "local-cli",
+  "file_scope": ["none", "working-tree", "branch"],
+  "web_scope": ["off", "shared"],
+  "control_output": ["json-schema", "nonce-block"],
+  "read_only_enforcement": "sandbox-and-tool-denylist",
+  "observed_evidence": ["file", "web"],
+  "timeouts": true
+}
+```
+
+The orchestrator computes the intersection across selected participants. It starts only if the requested file scope, requested web scope, timeout support, control-output support, and read-only enforcement are all present in that intersection. Otherwise it fails before launching participants with `blocked` and records which adapter capability was missing.
+
+Write-attempt handling is fail-closed. If observed metadata, CLI output, filesystem monitoring, or adapter exit status indicates an attempted edit, patch, commit, nested `converge-loop`, nested `review-loop`, or unauthorized tool call, the session stops as `blocked`, records the violation, and does not continue the debate.
 
 ## Control Contract
 
@@ -198,6 +262,8 @@ The session can end as:
 
 If a participant asks for evidence during convergence, the session moves back to discussion or ends as `needs_evidence`; it does not finalize while an unresolved evidence request could materially change the conclusion.
 
+The orchestrator, not the participants, adjudicates materiality for stopping. A pushback is material when it would change the conclusion, invalidate an assumption, add a meaningful option, identify a non-trivial risk, request evidence that could change the decision, or expose a requirement conflict. The explicit convergence turn asks the non-ready participant: "Do you have any material pushback, missing evidence, or better option that would change the conclusion?" If the answer contains only restated resolved points, style preferences, or non-actionable caveats, the orchestrator may finalize as `agreed`. If the answer contains new material pushback or an evidence request, the loop returns to discussion or ends as `needs_evidence`.
+
 ## Loop Policy
 
 Default limits:
@@ -211,6 +277,23 @@ Default limits:
 Progress is intentionally lightweight. A turn counts as progress when it adds a new pushback, improvement, evidence citation, evidence request, concession, answered question, or clearer conclusion. The loop should stop when participants repeat the same points without new evidence or movement.
 
 The no-progress stop should produce `clear_disagreement` when the disagreement is actionable, or `blocked` when the system cannot tell what would move the conversation forward.
+
+Foreground intervention pauses `--max-minutes` while the process is waiting for operator input. Turn-level timeouts still apply only to participant execution, not to human wait time. If the operator does not answer and no default is safe, the run ends as `operator_intervention`.
+
+## Background Jobs and Resume
+
+Foreground and background runs use the same session directory format. Background mode adds a job registry under the state root:
+
+- `jobs/<session-id>.json`: pid, command arguments, cwd, created_at, last_heartbeat_at, status, and session path.
+- `jobs/lock`: advisory lock used when listing, canceling, or updating job state.
+
+`converge-loop run --background` starts a detached Node child process with the same environment needed for provider credentials, writes the job record, prints the session id, and returns after the child records `session.json`. The child updates a heartbeat at least once per turn and on terminal state.
+
+`converge-loop status` lists recent sessions and jobs, marking a job `stale` when the pid no longer exists or the heartbeat is older than two turn-timeout windows. `converge-loop status <session-id>` reports one session and includes stale/orphan diagnostics.
+
+`converge-loop cancel <session-id>` sends a graceful signal to the background child, waits for it to persist `result.json` with status `canceled`, and escalates only if the process ignores the graceful signal. A canceled run keeps all completed turns and records that no conclusion was reached.
+
+`converge-loop resume <session-id>` reloads `session.json`, `turns.jsonl`, and participant state, revalidates adapter availability and capability intersection, appends a resume event, and continues from the next turn. Resume is allowed only for sessions in `operator_intervention`, `timeout`, `needs_evidence`, `canceled`, or `stale` when the last completed turn is valid. It is rejected for `agreed`, `clear_disagreement`, and `blocked` unless the operator starts a new run with the prior transcript as context.
 
 ## Output Modes
 
@@ -237,9 +320,19 @@ Each session directory contains:
 - `session.json`: metadata, options, participants, state, and current turn index.
 - `turns.jsonl`: one JSON object per participant turn.
 - `transcript.md`: human-readable transcript.
-- `evidence-ledger.jsonl`: repo evidence each participant cited or requested.
+- `evidence-ledger.jsonl`: file and web evidence each participant cited or requested.
 - `conclusion.md`: final synthesized result when available.
 - `result.json`: normalized final status.
+
+Every persisted JSON object carries a schema version:
+
+- `session.json`: `schema_version: "converge-loop.session.v1"`
+- each `turns.jsonl` record: `schema_version: "converge-loop.turn.v1"`
+- each `evidence-ledger.jsonl` record: `schema_version: "converge-loop.evidence.v1"`
+- `jobs/<session-id>.json`: `schema_version: "converge-loop.job.v1"`
+- `result.json`: `schema_version: "converge-loop.result.v1"`
+
+The v1 runtime may reject newer major schema versions with a clear error. Minor additive fields are ignored by readers unless they are required by a future `minimum_runtime_version` field.
 
 Repo-local export is explicit:
 
@@ -253,7 +346,7 @@ Before exporting into a Git worktree, the command checks whether the destination
 
 ```json
 {
-  "schema_version": "1",
+  "schema_version": "converge-loop.result.v1",
   "status": "agreed",
   "summary": "Use direct read-only repo browsing with same-scope permissions and an evidence ledger.",
   "conclusion_path": "conclusion.md",
@@ -280,6 +373,7 @@ Before exporting into a Git worktree, the command checks whether the destination
   "independent_provider_coverage": true,
   "fallbacks_used": [],
   "scope": "working-tree",
+  "web_scope": "off",
   "output_mode": "compact",
   "agreements": [],
   "pushbacks_resolved": [],
@@ -326,6 +420,8 @@ Participants are read-only:
 
 Adapters must mechanically enforce read-only execution and per-call timeouts. If an adapter cannot enforce the same read-only scope and tool constraints as the other participant, it cannot participate in the session.
 
+This permission rule applies to both file and web access. Provider-native tools outside the orchestrator allowlist are disabled. If disabling them cannot be proven, the adapter is unavailable for that run.
+
 ## Relationship to review-loop
 
 The intended pipeline is:
@@ -339,18 +435,59 @@ converge-loop deliberation
 
 `converge-loop` may recommend running `review-loop`, but participant agents must not invoke `review-loop` from inside the deliberation. The host agent or operator can run `review-loop` after the conversation completes.
 
+## Test Strategy
+
+The runtime must be testable without live model providers. The core test seam is a deterministic participant adapter interface:
+
+- `fake-sequence` adapter returns scripted turns from fixtures.
+- `fake-replay` adapter replays recorded transcripts and control blocks.
+- `fake-tooling` adapter emits observed file/web evidence and attempted write/tool violations.
+
+Required test coverage:
+
+- CLI parser and validation for every command and invalid option combination.
+- Adapter capability intersection, including degraded fallback disclosure and fail-closed missing enforcement.
+- Control parsing for schema-bound output, nonce-delimited fallback blocks, malformed retries, and repeated malformed output.
+- Turn alternation, progress/no-progress detection, convergence attempt, late evidence request handling, and every terminal status.
+- File/web evidence ledger recording, observed versus self-reported evidence, and residual asymmetry summary.
+- Session persistence, schema versions, result export, ignored `.converge-loop/` protection, resume, background status, stale detection, and cancel.
+- Read-only enforcement violation handling for attempted edit, patch, commit, nested `converge-loop`, nested `review-loop`, and unauthorized provider-native web use.
+
+Live provider tests are smoke tests only. They should verify adapter preflight and one minimal foreground exchange when credentials are available, but they must not be required for deterministic CI.
+
 ## MVP Implementation Plan
 
-1. Create a standalone local plugin with the `converge-loop` command and skills.
-2. Implement synchronous `converge-loop run` for two agents with a turn cap.
-3. Add read-only Codex and Claude adapters with direct repo browsing in the same scope.
-4. Add transcript, evidence-ledger, and result persistence in user-local state.
-5. Define schema-bound turn output and nonce-delimited fallback control parsing.
-6. Add compact, verbose, and quiet output modes.
-7. Add stopping rules for agreement, clear disagreement, needs evidence, operator intervention, timeout, and max turns.
-8. Add primary-agent sub-agent fallback with degraded coverage disclosure.
-9. Add background `status`, `result`, and `cancel`.
-10. Document the recommended handoff to `review-loop`.
+Build the runtime in risk-ordered slices. Each slice should leave the repo in a usable state and pass deterministic tests.
+
+1. Command skeleton and fake loop.
+   - Add `package.json`, `scripts/bin/converge-loop.mjs`, CLI parser, `run/status/result/cancel/resume` stubs, state directory resolution, and fake adapter support.
+   - Acceptance: `converge-loop run --agents fake-sequence,fake-sequence --topic ...` executes a two-turn foreground loop, persists session files with schema versions, and `result <id>` prints the normalized result.
+
+2. Control contract and stopping policy.
+   - Implement schema-bound control parsing, nonce fallback parsing, retry behavior, progress heuristic, materiality adjudication, convergence attempt, terminal statuses, and compact output.
+   - Acceptance: fixture tests cover `agreed`, `clear_disagreement`, `needs_evidence`, `operator_intervention`, `blocked`, `max_turns`, and `timeout`.
+
+3. Read-only file evidence and adapter capability preflight.
+   - Implement file-scope validation, artifact/context validation, adapter capability intersection, observed/self-reported evidence model, and fail-closed read-only enforcement checks.
+   - Acceptance: fake tooling proves same-scope file reads, branch scope requires `--base`, and write/patch/commit attempts stop as `blocked`.
+
+4. Real local adapters.
+   - Add Codex and Claude local CLI adapters only after their read-only flags, tool-denylist behavior, timeout behavior, and control-output support can be proven in preflight.
+   - Acceptance: adapter preflight fails closed when enforcement is unavailable; with available adapters, a minimal foreground two-agent run completes using the same file scope.
+
+5. Shared web scope.
+   - Add `--web shared` through an orchestrator-owned search/fetch tool, evidence logging for queries/URLs, and provider-native web disabling checks.
+   - Acceptance: both participants receive identical shared web tool capability; unavailable symmetric web support downgrades to `off` only when web was not explicitly requested, otherwise blocks before launch.
+
+6. Background, cancel, status, and resume.
+   - Add job registry, heartbeat, stale detection, graceful cancel, and resumable session continuation.
+   - Acceptance: tests cover active/stale/completed status, cancel terminal result, resume from an allowed state, and rejection from terminal agreed/blocked states.
+
+7. Output modes, export, and docs.
+   - Add verbose/quiet modes, repo-local export protection, command docs, and the handoff note that `review-loop` remains an external validation step.
+   - Acceptance: output snapshots and export tests pass; documentation matches implemented commands.
+
+v1 is done when slices 1-7 pass deterministic tests, the plugin validates, at least one real opposite-provider pairing passes adapter preflight in the maintainer environment, and unsupported adapters fail closed with actionable diagnostics.
 
 ## Product Decisions To Revisit Later
 
