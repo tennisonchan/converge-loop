@@ -1,50 +1,24 @@
 # converge-loop
 
-`converge-loop` is a local Codex plugin for multi-agent deliberation.
+This repository is a local Codex plugin marketplace for `converge-loop`.
 
-It is intentionally separate from `review-loop`:
+The plugin source lives in [`plugins/converge-loop`](plugins/converge-loop). The marketplace metadata lives in [`.agents/plugins/marketplace.json`](.agents/plugins/marketplace.json), so Codex can install the plugin from this repository root.
 
-- `converge-loop` is for deliberation: debate, pushback, negotiation, evidence gathering, and convergence while work is still fluid.
-- `review-loop` is for validation: independent read-only review gates when an artifact is ready to proceed.
+## Install
 
-The current repository contains the product design, plugin scaffold, and Node.js command runtime.
-
-## Current Contents
-
-- `.codex-plugin/plugin.json`: Codex plugin manifest.
-- `skills/converge-loop/SKILL.md`: skill surface for when to use the command.
-- `scripts/bin/converge-loop.mjs`: command entrypoint.
-- `scripts/lib/`: runtime modules for CLI parsing, orchestration, adapters, and state.
-- `tests/`: deterministic fake-adapter tests.
-- `docs/design-plan.md`: canonical product design plan.
-- `docs/archive/review-loop-source-draft.md`: preserved draft copied from the old review-loop checkout.
-
-## Command
-
-Run from this repo with Node:
+From the repository root:
 
 ```bash
-node scripts/bin/converge-loop.mjs run --agents fake-sequence,fake-sequence --topic "Improve this plan"
+codex plugin marketplace add "$PWD"
+codex plugin add converge-loop@converge-loop
 ```
 
-After package linking or installation, use the bin directly:
+Start a new Codex thread after reinstalling so the updated skills and command surface are loaded.
+
+## Develop
 
 ```bash
-converge-loop run --agents fake-sequence,fake-sequence --topic "Improve this plan"
-converge-loop status
-converge-loop result <session-id>
-converge-loop cancel <session-id>
-converge-loop resume <session-id>
+npm test --prefix plugins/converge-loop
 ```
 
-The deterministic fake adapters are the verified local path. Real `codex` and `claude` adapter scaffolds fail closed unless `CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS=1` is set and read-only preflight checks pass.
-
-## Verification
-
-```bash
-npm test
-```
-
-## Design
-
-Read [docs/design-plan.md](docs/design-plan.md) for the current product plan.
+Read [`plugins/converge-loop/README.md`](plugins/converge-loop/README.md) for runtime usage and product details.
