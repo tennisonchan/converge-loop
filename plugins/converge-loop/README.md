@@ -25,20 +25,22 @@ From the repository root, enter the plugin directory and run the command with No
 
 ```bash
 cd plugins/converge-loop
-node scripts/bin/converge-loop.mjs run --agents fake-sequence,fake-sequence --topic "Improve this plan"
+CONVERGE_LOOP_HOST=akx node scripts/bin/converge-loop.mjs run --topic "Improve this plan"
 ```
 
 After package linking, package installation, or Codex plugin installation, use the bin directly:
 
 ```bash
-converge-loop run --agents fake-sequence,fake-sequence --topic "Improve this plan"
+CONVERGE_LOOP_HOST=akx converge-loop run --topic "Improve this plan"
 converge-loop status
 converge-loop result <session-id>
 converge-loop cancel <session-id>
 converge-loop resume <session-id>
 ```
 
-The deterministic fake adapters are the verified local path. Real `codex` and `claude` adapter scaffolds fail closed unless `CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS=1` is set and read-only preflight checks pass.
+The normal installed-skill path should use the host-aware default pairing: `akx` / Codex pairs with `akc` / Claude Code, and `akc` pairs with `akx`. The host plugin should set `CONVERGE_LOOP_HOST=akx` or `CONVERGE_LOOP_HOST=akc`; shell users can set it explicitly. Deterministic fake adapters are for verification only. Real `codex` and `claude` adapter scaffolds fail closed unless `CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS=1` is set and read-only preflight checks pass.
+
+Until the real-adapter slice is fully enabled in your environment, the bare command may return a blocked fail-closed result. For installation smoke tests only, use `--agents fake-sequence,fake-sequence` and treat the result as deterministic test coverage, not independent provider deliberation.
 
 ## Verification
 

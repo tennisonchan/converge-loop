@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { buildParticipants } from "../scripts/lib/adapters.mjs";
 import { runCli } from "../scripts/lib/cli.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -86,6 +87,62 @@ test("default real adapters fail closed without explicit safe local adapter enab
   const parsed = JSON.parse(result.stdout);
   assert.equal(parsed.status, "blocked");
   assert.match(parsed.summary, /fail-closed/);
+});
+
+test("host aliases select the expected default opposite-agent order", () => {
+  const options = { agents: null, roles: null };
+  for (const host of [undefined, "", "akx", "codex", "openai"]) {
+    assert.deepEqual(
+      buildParticipants(options, { CONVERGE_LOOP_HOST: host }).map((participant) => participant.adapter),
+      ["codex", "claude"]
+    );
+  }
+  for (const host of ["akc", "claude", "claude-code", "anthropic"]) {
+    assert.deepEqual(
+      buildParticipants(options, { CONVERGE_LOOP_HOST: host }).map((participant) => participant.adapter),
+      ["claude", "codex"]
+    );
+  }
+  assert.throws(
+    () => buildParticipants(options, { CONVERGE_LOOP_HOST: "gemini" }),
+    /unsupported CONVERGE_LOOP_HOST: gemini/
+  );
+});
+
+test("run fails fast for unsupported explicit host", async () => {
+  const stateRoot = tempRoot("bad-host");
+  const harness = io(stateRoot);
+  harness.env.CONVERGE_LOOP_HOST = "gemini";
+  const code = await runCli(["run", "--topic", "x", "--json"], harness);
+  assert.equal(code, 1);
+  assert.deepEqual(
+    harness.out,
+    []
+  );
+  assert.match(harness.err.join(""), /unsupported CONVERGE_LOOP_HOST: gemini/);
+});
+
+test("host aliases are recorded as normalized host_agent values", async () => {
+  const stateRoot = tempRoot("host-record");
+  const harness = io(stateRoot);
+  harness.env.CONVERGE_LOOP_HOST = "akc";
+  const code = await runCli([
+    "run",
+    "--agents",
+    "fake-sequence,fake-sequence",
+    "--topic",
+    "host record",
+    "--json"
+  ], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  assert.equal(JSON.parse(harness.out.join("")).host_agent, "claude");
+});
+
+test("help presents host-aware run example before fake adapter smoke paths", async () => {
+  const result = await cli(["help"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /CONVERGE_LOOP_HOST=akx converge-loop run --topic/);
+  assert.doesNotMatch(result.stdout, /fake-sequence,fake-sequence/);
 });
 
 test("fixture coverage includes terminal statuses", async () => {

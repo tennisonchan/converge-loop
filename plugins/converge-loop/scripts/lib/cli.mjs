@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_RUN_OPTIONS, RESULT_SCHEMA, RESUMABLE_STATUSES } from "./constants.mjs";
+import { normalizeHostAgent } from "./adapters.mjs";
 import { runSession } from "./orchestrator.mjs";
 import { StateStore } from "./state-store.mjs";
 import {
@@ -40,7 +41,7 @@ export function parseRunArgs(args, io) {
   const options = {
     ...DEFAULT_RUN_OPTIONS,
     cwd: io.cwd,
-    hostAgent: io.env.CONVERGE_LOOP_HOST || "codex",
+    hostAgent: normalizeHostAgent(io.env.CONVERGE_LOOP_HOST),
     sessionId: null,
     fixture: null,
     turnDelayMs: 0,
@@ -382,7 +383,7 @@ function helpText() {
   converge-loop resume <session-id>
 
 Run examples:
-  converge-loop run --agents fake-sequence,fake-sequence --topic "Improve this plan"
+  CONVERGE_LOOP_HOST=akx converge-loop run --topic "Improve this plan"
   converge-loop run --artifact plan.md --focus "Ask for pushback"
 `;
 }
