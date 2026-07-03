@@ -1,0 +1,20 @@
+{
+  "name": "converge-loop",
+  "interface": {
+    "displayName": "converge-loop"
+  },
+  "plugins": [
+    {
+      "name": "converge-loop",
+      "source": {
+        "source": "local",
+        "path": "./plugins/converge-loop"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
