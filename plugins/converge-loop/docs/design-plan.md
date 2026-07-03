@@ -21,6 +21,7 @@ The product replaces a manual workflow the operator already performs:
 
 - Support constructive pushback, debate, negotiation, and convergence.
 - Use agents from different companies/providers by default for genuinely different model behavior.
+- Make the default installed-skill experience host-aware: `akx` (Codex) pairs with `akc` (Claude Code), and `akc` pairs with `akx`.
 - Use the primary agent's sub-agent as a degraded fallback when an external participant is unavailable.
 - Let both agents browse the repo directly within the same read-only scope.
 - Let both agents gather web context through the same shared read-only web scope when web access is explicitly enabled.
@@ -51,7 +52,9 @@ The default flow is:
    converge-loop run --scope working-tree --focus "Push back on this implementation plan"
    ```
 
-2. `converge-loop` selects two participants, preferring different providers.
+2. `converge-loop` selects two participants by default from the current host:
+   - when invoked from `akx`, the primary participant is Codex and the secondary participant is `akc` / Claude Code
+   - when invoked from `akc`, the primary participant is Claude Code and the secondary participant is `akx` / Codex
 3. Both participants receive the same topic, artifact/context, working directory, scope policy, permissions, and transcript.
 4. The first participant responds with a proposal, critique, or synthesis.
 5. The second participant responds with constructive pushback, improvements, questions, evidence, or explicit agreement.
@@ -88,7 +91,7 @@ Useful `run` options:
 - `--base <ref>`: base ref for branch-scope material.
 - `--web off|shared`: web scope available to both participants; default is `off`.
 - `--focus <text>`: narrow the discussion.
-- `--agents codex,claude`: select participant adapters.
+- `--agents <list>`: override default participant selection; default is host-aware auto-selection.
 - `--roles proposer,critic`: select stance for each participant.
 - `--output compact|verbose|quiet`: terminal display mode; default is `compact`.
 - `--intervene`: allow the orchestrator to pause and ask the operator for input.
@@ -124,6 +127,8 @@ The `.codex-plugin/plugin.json` manifest continues to expose `skills` because th
 
 The first implementation slice must create the package metadata, bin wrapper, command parser, and no-provider fake adapter path before any real provider adapter is added. That keeps command wiring testable without live model credentials.
 
+The installed skill should not make fake adapters feel like the normal product path. Fake adapters are for deterministic tests, smoke checks, and fixture-driven development. In normal use, omitting `--agents` means "use the current host and its opposite agent," matching the `review-loop` host/opposite-agent convention.
+
 ## Participants
 
 The default v1 session has two active participants:
@@ -133,12 +138,17 @@ The default v1 session has two active participants:
 
 Roles are stances, not fixed personalities. Either participant can agree, disagree, concede, ask questions, or improve the proposal.
 
-Default participant selection is deterministic:
+Default participant selection is host-aware and deterministic:
 
-- Codex-hosted sessions prefer `codex,claude`.
-- Claude-hosted sessions prefer `claude,codex`.
+- `akx` / Codex-hosted sessions use Codex as the primary participant and `akc` / Claude Code as the secondary participant.
+- `akc` / Claude Code-hosted sessions use Claude Code as the primary participant and `akx` / Codex as the secondary participant.
+- CLI-only sessions without a known host infer the host from `CONVERGE_LOOP_HOST`; if unset, they default to the Codex-hosted order.
 - If the preferred opposite-provider adapter is unavailable or unauthenticated, the orchestrator uses an explicitly configured alternate provider when present.
 - If no external alternate is available, the orchestrator uses the primary agent's sub-agent fallback and marks coverage as degraded.
+
+Host identity must be normalized before participant selection. `akx`, `codex`, and `openai` are Codex-host aliases. `akc`, `claude`, `claude-code`, and `anthropic` are Claude-host aliases. Host integrations should set `CONVERGE_LOOP_HOST` explicitly. An unset host defaults to the Codex-hosted order for CLI-only use; an explicitly unknown host value fails closed.
+
+The default agent order is primary host first, opposite agent second. That means the operator should usually invoke `converge-loop run ...` without `--agents`. `--agents` is an override for diagnostics, tests, or intentionally non-default pairings, not the standard skill path.
 
 When `--agents` and `--roles` are both supplied, they bind positionally: `agents[i]` receives `roles[i]`. If `--agents` is supplied without `--roles`, roles default to `proposer,critic` in agent order. If `--roles` is supplied without `--agents`, the host default participant order is used.
 
@@ -403,7 +413,9 @@ Participant selection has three tiers:
 2. Explicitly configured alternate provider, if the preferred participant is unavailable.
 3. Primary agent's own sub-agent as degraded fallback.
 
-The "primary agent" is the host or launcher that invoked `converge-loop`, recorded as `host_agent` in `session.json`. A primary sub-agent fallback is launched through that host's participant adapter, not by recursively calling `converge-loop run`.
+This follows the same product rule as `review-loop`: the default peer is the opposite agent, and the primary host's own agent path is only a degraded fallback when the opposite agent cannot run.
+
+The "primary agent" is the host or launcher that invoked `converge-loop`, recorded as `host_agent` in `session.json`. A primary sub-agent fallback is launched through that host's participant adapter, not by recursively calling `converge-loop run`. In an `akx` session, fallback means a Codex-managed sub-agent or equivalent restricted same-provider path. In an `akc` session, fallback means a Claude-managed sub-agent or equivalent restricted same-provider path.
 
 Fallback results must disclose the degraded coverage in `participants`, `fallbacks_used`, `independent_provider_coverage`, and the final summary.
 
@@ -472,8 +484,8 @@ Build the runtime in risk-ordered slices. Each slice should leave the repo in a 
    - Acceptance: fake tooling proves same-scope file reads, branch scope requires `--base`, and write/patch/commit attempts stop as `blocked`.
 
 4. Real local adapters.
-   - Add Codex and Claude local CLI adapters only after their read-only flags, tool-denylist behavior, timeout behavior, and control-output support can be proven in preflight.
-   - Acceptance: adapter preflight fails closed when enforcement is unavailable; with available adapters, a minimal foreground two-agent run completes using the same file scope.
+   - Add Codex and Claude local CLI adapters only after their read-only flags, tool-denylist behavior, timeout behavior, control-output support, and host/opposite selection can be proven in preflight.
+   - Acceptance: adapter preflight fails closed when enforcement is unavailable; host aliases normalize correctly; from `akx`, default selection pairs Codex with `akc`; from `akc`, default selection pairs Claude Code with `akx`; with available adapters, a minimal foreground two-agent run completes using the same file scope.
 
 5. Shared web scope.
    - Add `--web shared` through an orchestrator-owned search/fetch tool, evidence logging for queries/URLs, and provider-native web disabling checks.

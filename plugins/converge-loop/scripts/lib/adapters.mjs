@@ -15,7 +15,7 @@ const BASE_FAKE_CAPABILITIES = {
 };
 
 export function buildParticipants(options, env = process.env) {
-  const host = env.CONVERGE_LOOP_HOST || "codex";
+  const host = normalizeHostAgent(env.CONVERGE_LOOP_HOST);
   const agents = options.agents || (host === "claude" ? ["claude", "codex"] : ["codex", "claude"]);
   const roles = options.roles || ["proposer", "critic"];
   return agents.map((adapter, index) => {
@@ -29,6 +29,14 @@ export function buildParticipants(options, env = process.env) {
       fallback_for: null
     };
   });
+}
+
+export function normalizeHostAgent(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return "codex";
+  if (["akc", "claude", "claude-code", "anthropic"].includes(normalized)) return "claude";
+  if (["akx", "codex", "openai"].includes(normalized)) return "codex";
+  throw new Error(`unsupported CONVERGE_LOOP_HOST: ${value}`);
 }
 
 export function preflightParticipants(participants, options, env = process.env) {
