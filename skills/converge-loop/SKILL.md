@@ -12,7 +12,11 @@ Use this skill when the user wants agents to reason together before execution or
 - Use `converge-loop` when the work is still fluid and would benefit from pushback, better ideas, negotiated tradeoffs, or explicit unresolved disagreement.
 - Use `review-loop` when the work is ready to be independently checked for blockers before handoff, finalization, or merge.
 
-The current plugin is a product-design scaffold. The command runtime is not implemented yet.
+The plugin includes a Node.js command runtime. Invoke it through the package bin when installed or directly from the plugin source:
+
+```bash
+node scripts/bin/converge-loop.mjs run --agents fake-sequence,fake-sequence --topic "Improve this plan"
+```
 
 When helping evolve this plugin:
 
@@ -22,6 +26,7 @@ When helping evolve this plugin:
 4. Do not force disagreement. Encourage constructive pushback, better ideas, evidence requests, and convergence.
 5. Keep human intervention optional unless the operator opts in or interrupts.
 6. Do not add implementation, file edits, or review-gate semantics to `converge-loop`; downstream action belongs to the host agent and deterministic validation belongs to `review-loop`.
+7. Prefer deterministic fake adapters for local verification. Real provider adapters are fail-closed unless read-only preflight checks prove safe execution.
 
 For the current design, read:
 

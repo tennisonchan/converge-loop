@@ -1,0 +1,13 @@
+{
+  "name": "converge-loop",
+  "version": "0.1.0",
+  "description": "Run multi-agent deliberation loops that debate, negotiate, and converge on stronger plans.",
+  "type": "module",
+  "bin": {
+    "converge-loop": "./scripts/bin/converge-loop.mjs"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.mjs"
+  },
+  "license": "Apache-2.0"
+}
