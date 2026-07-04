@@ -45,6 +45,67 @@ function writeFixture(dir, value) {
   return file;
 }
 
+function writeLocalCliPair(dir, overrides = {}) {
+  fs.mkdirSync(dir, { recursive: true });
+  const codex = path.join(dir, "codex");
+  const claude = path.join(dir, "claude");
+  const codexHelp = overrides.codexHelp || "Usage: codex exec --sandbox --cd --ignore-user-config";
+  const claudeHelp = overrides.claudeHelp || "Usage: claude --print --permission-mode --disallowedTools --output-format --safe-mode";
+  const codexAuth = overrides.codexAuth ?? "Logged in using ChatGPT\n";
+  const claudeAuth = overrides.claudeAuth ?? "{\"loggedIn\":true,\"authMethod\":\"oauth\"}\n";
+  const codexAuthExit = overrides.codexAuthExit ?? 0;
+  const claudeAuthExit = overrides.claudeAuthExit ?? 0;
+  fs.writeFileSync(codex, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "exec" && args[1] === "--help") {
+  process.stdout.write(${JSON.stringify(`${codexHelp}\n`)});
+  process.exit(0);
+}
+if (args[0] === "login" && args[1] === "status") {
+  process.stdout.write(${JSON.stringify(codexAuth)});
+  process.exit(${codexAuthExit});
+}
+if (args[0] === "exec") {
+  let input = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => { input += chunk; });
+  process.stdin.on("end", () => {
+    const nonce = /nonce ([a-f0-9]+)/i.exec(input)?.[1] || "missing";
+    process.stdout.write("codex smoke ok\\n<<<CONVERGE_LOOP_CONTROL " + nonce + ">>>\\n" + JSON.stringify({
+      status: "agreed",
+      confidence: "high",
+      agreements: ["codex local cli invoked"],
+      ready_to_converge: true
+    }) + "\\n<<<END_CONVERGE_LOOP_CONTROL " + nonce + ">>>\\n");
+  });
+} else {
+  process.stdout.write("codex\\n");
+}
+`);
+  fs.writeFileSync(claude, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "--help") {
+  process.stdout.write(${JSON.stringify(`${claudeHelp}\n`)});
+  process.exit(0);
+}
+if (args[0] === "auth" && args[1] === "status" && args[2] === "--json") {
+  process.stdout.write(${JSON.stringify(claudeAuth)});
+  process.exit(${claudeAuthExit});
+}
+const prompt = args.join(" ");
+const nonce = /nonce ([a-f0-9]+)/i.exec(prompt)?.[1] || "missing";
+process.stdout.write("claude smoke ok\\n<<<CONVERGE_LOOP_CONTROL " + nonce + ">>>\\n" + JSON.stringify({
+  status: "agreed",
+  confidence: "high",
+  agreements: ["claude local cli invoked"],
+  ready_to_converge: true
+}) + "\\n<<<END_CONVERGE_LOOP_CONTROL " + nonce + ">>>\\n");
+`);
+  fs.chmodSync(codex, 0o755);
+  fs.chmodSync(claude, 0o755);
+  return { codex, claude, binDir: dir };
+}
+
 function resultPath(stateRoot, id) {
   return path.join(stateRoot, "sessions", id, "result.json");
 }
@@ -93,13 +154,7 @@ test("default real adapters fail closed without explicit safe local adapter enab
 test("setup verifies local cli readiness and enables real adapters without env flag", async () => {
   const stateRoot = tempRoot("setup");
   const binDir = path.join(stateRoot, "bin");
-  fs.mkdirSync(binDir, { recursive: true });
-  const codex = path.join(binDir, "codex");
-  const claude = path.join(binDir, "claude");
-  fs.writeFileSync(codex, "#!/bin/sh\nif [ \"$1\" = \"exec\" ]; then echo 'Usage: codex exec --sandbox --cd'; exit 0; fi\necho 'codex';\n");
-  fs.writeFileSync(claude, "#!/bin/sh\necho 'Usage: claude --print --permission-mode --disallowedTools --output-format';\n");
-  fs.chmodSync(codex, 0o755);
-  fs.chmodSync(claude, 0o755);
+  writeLocalCliPair(binDir);
   const harness = io(stateRoot);
   harness.env.PATH = `${binDir}${path.delimiter}${harness.env.PATH || ""}`;
   delete harness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS;
@@ -110,6 +165,8 @@ test("setup verifies local cli readiness and enables real adapters without env f
   assert.equal(setup.enabled, true);
   assert.equal(setup.checks.codex.ok, true);
   assert.equal(setup.checks.claude.ok, true);
+  assert.equal(setup.checks.codex.auth.ok, true);
+  assert.equal(setup.checks.claude.auth.ok, true);
   assert.ok(fs.existsSync(setup.config_path));
 
   const runHarness = io(stateRoot);
@@ -123,6 +180,121 @@ test("setup verifies local cli readiness and enables real adapters without env f
   assert.deepEqual(parsed.participants.map((participant) => participant.adapter), ["codex", "claude"]);
 });
 
+test("setup --check-only reports readiness without writing config", async () => {
+  const stateRoot = tempRoot("setup-check-only");
+  const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"));
+  const harness = io(stateRoot);
+  harness.env.PATH = `${binDir}${path.delimiter}${harness.env.PATH || ""}`;
+  const code = await runCli(["setup", "--check-only", "--json"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const setup = JSON.parse(harness.out.join(""));
+  assert.equal(setup.ok, true);
+  assert.equal(setup.mode, "check-only");
+  assert.equal(setup.config_changed, false);
+  assert.deepEqual(setup.actions, []);
+  assert.equal(fs.existsSync(setup.config_path), false);
+});
+
+test("setup --check-only fails closed without writing config when readiness fails", async () => {
+  const stateRoot = tempRoot("setup-check-only-fail");
+  const harness = io(stateRoot);
+  harness.env.CONVERGE_LOOP_CODEX_BIN = path.join(stateRoot, "missing-codex");
+  harness.env.CONVERGE_LOOP_CLAUDE_BIN = path.join(stateRoot, "missing-claude");
+  const code = await runCli(["setup", "--check-only", "--json"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const setup = JSON.parse(harness.out.join(""));
+  assert.equal(setup.ok, false);
+  assert.equal(setup.enabled, false);
+  assert.equal(setup.mode, "check-only");
+  assert.equal(setup.config_changed, false);
+  assert.deepEqual(setup.actions, []);
+  assert.equal(fs.existsSync(setup.config_path), false);
+});
+
+test("setup --disable writes disabled config and runtime stays blocked", async () => {
+  const stateRoot = tempRoot("setup-disable");
+  const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"));
+  const harness = io(stateRoot);
+  harness.env.PATH = `${binDir}${path.delimiter}${harness.env.PATH || ""}`;
+  harness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS = "1";
+  const code = await runCli(["setup", "--disable", "--json"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const setup = JSON.parse(harness.out.join(""));
+  assert.equal(setup.ok, true);
+  assert.equal(setup.enabled, false);
+  assert.equal(setup.mode, "disable");
+  assert.match(setup.warnings.join("\n"), /overrides setup config/);
+  const config = JSON.parse(fs.readFileSync(setup.config_path, "utf8"));
+  assert.equal(config.enabled, false);
+  assert.match(config.disabled_at, /\d{4}-\d{2}-\d{2}T/);
+
+  const runHarness = io(stateRoot);
+  runHarness.env.PATH = `${binDir}${path.delimiter}${runHarness.env.PATH || ""}`;
+  runHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE = "1";
+  delete runHarness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS;
+  const runCode = await runCli(["run", "--topic", "disabled", "--json"], runHarness);
+  assert.equal(runCode, 0, runHarness.err.join(""));
+  const parsed = JSON.parse(runHarness.out.join(""));
+  assert.equal(parsed.status, "blocked");
+  assert.match(parsed.summary, /run `converge-loop setup`/);
+});
+
+test("setup rejects incompatible control flags", async () => {
+  for (const args of [
+    ["setup", "--disable", "--check-only"],
+    ["setup", "--disable", "--smoke"],
+    ["setup", "--check-only", "--smoke"]
+  ]) {
+    const result = await cli(args);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /cannot be combined/);
+  }
+});
+
+test("setup auth checks fail closed on unauthenticated or ambiguous output", async () => {
+  const cases = [
+    ["codex-not-logged-in", { codexAuth: "Not logged in\n" }, /not recognized as authenticated/],
+    ["codex-ambiguous", { codexAuth: "Ready\n" }, /not recognized as authenticated/],
+    ["claude-malformed", { claudeAuth: "not-json\n" }, /valid JSON/],
+    ["claude-logged-out", { claudeAuth: "{\"loggedIn\":false}\n" }, /not logged in/]
+  ];
+  for (const [name, overrides, reason] of cases) {
+    const stateRoot = tempRoot(name);
+    const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"), overrides);
+    const harness = io(stateRoot);
+    harness.env.PATH = `${binDir}${path.delimiter}${harness.env.PATH || ""}`;
+    const code = await runCli(["setup", "--json"], harness);
+    assert.equal(code, 0, harness.err.join(""));
+    const setup = JSON.parse(harness.out.join(""));
+    assert.equal(setup.ok, false);
+    assert.equal(setup.enabled, false);
+    assert.match(JSON.stringify(setup.checks), reason);
+    const config = JSON.parse(fs.readFileSync(setup.config_path, "utf8"));
+    assert.equal(config.enabled, false);
+  }
+});
+
+test("run remains blocked after auth-failed setup writes disabled config", async () => {
+  const stateRoot = tempRoot("auth-failed-run-blocked");
+  const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"), { codexAuth: "Not logged in\n" });
+  const setupHarness = io(stateRoot);
+  setupHarness.env.PATH = `${binDir}${path.delimiter}${setupHarness.env.PATH || ""}`;
+  const setupCode = await runCli(["setup", "--json"], setupHarness);
+  assert.equal(setupCode, 0, setupHarness.err.join(""));
+  const setup = JSON.parse(setupHarness.out.join(""));
+  assert.equal(setup.ok, false);
+  assert.equal(setup.enabled, false);
+
+  const runHarness = io(stateRoot);
+  runHarness.env.PATH = `${binDir}${path.delimiter}${runHarness.env.PATH || ""}`;
+  runHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE = "1";
+  const runCode = await runCli(["run", "--topic", "auth failed", "--json"], runHarness);
+  assert.equal(runCode, 0, runHarness.err.join(""));
+  const parsed = JSON.parse(runHarness.out.join(""));
+  assert.equal(parsed.status, "blocked");
+  assert.match(parsed.summary, /run `converge-loop setup`/);
+});
+
 test("setup reports unavailable local cli controls without enabling adapters", async () => {
   const stateRoot = tempRoot("setup-unavailable");
   const harness = io(stateRoot);
@@ -134,6 +306,82 @@ test("setup reports unavailable local cli controls without enabling adapters", a
   assert.equal(parsed.ok, false);
   assert.equal(parsed.enabled, false);
   assert.match(parsed.next_step, /Install and authenticate/);
+});
+
+test("runtime preflight rechecks the same required flags as setup", async () => {
+  const stateRoot = tempRoot("runtime-preflight-flags");
+  const binDir = path.join(stateRoot, "bin");
+  const firstPair = writeLocalCliPair(binDir);
+  const setupHarness = io(stateRoot);
+  setupHarness.env.PATH = `${binDir}${path.delimiter}${setupHarness.env.PATH || ""}`;
+  setupHarness.env.CONVERGE_LOOP_CODEX_BIN = firstPair.codex;
+  setupHarness.env.CONVERGE_LOOP_CLAUDE_BIN = firstPair.claude;
+  const setupCode = await runCli(["setup", "--json"], setupHarness);
+  assert.equal(setupCode, 0, setupHarness.err.join(""));
+  assert.equal(JSON.parse(setupHarness.out.join("")).enabled, true);
+
+  const secondPair = writeLocalCliPair(binDir, { codexHelp: "Usage: codex exec --sandbox" });
+  const runHarness = io(stateRoot);
+  runHarness.env.PATH = `${binDir}${path.delimiter}${runHarness.env.PATH || ""}`;
+  runHarness.env.CONVERGE_LOOP_CODEX_BIN = secondPair.codex;
+  runHarness.env.CONVERGE_LOOP_CLAUDE_BIN = secondPair.claude;
+  runHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE = "1";
+  const runCode = await runCli(["run", "--topic", "runtime flags", "--json"], runHarness);
+  assert.equal(runCode, 0, runHarness.err.join(""));
+  const parsed = JSON.parse(runHarness.out.join(""));
+  assert.equal(parsed.status, "blocked");
+  assert.match(parsed.summary, /missing required read-only flags: --cd/);
+});
+
+test("setup --smoke uses explicit codex and claude adapters without fallback", async () => {
+  const stateRoot = tempRoot("setup-smoke");
+  const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"));
+  const harness = io(stateRoot);
+  harness.env.PATH = `${binDir}${path.delimiter}${harness.env.PATH || ""}`;
+  const code = await runCli(["setup", "--smoke", "--json"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const setup = JSON.parse(harness.out.join(""));
+  assert.equal(setup.ok, true);
+  assert.equal(setup.enabled, true);
+  assert.equal(setup.smoke.ok, true);
+  assert.deepEqual(setup.smoke.participants, ["codex", "claude"]);
+  assert.equal(setup.smoke.independent_provider_coverage, true);
+  assert.deepEqual(setup.smoke.fallbacks_used, []);
+  assert.equal(setup.smoke.diagnostic_path, null);
+  assert.ok(fs.existsSync(setup.config_path));
+});
+
+test("setup --smoke fails closed instead of falling back when secondary adapter is unavailable", async () => {
+  const stateRoot = tempRoot("setup-smoke-no-fallback");
+  const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"));
+  const harness = io(stateRoot);
+  harness.env.PATH = `${binDir}${path.delimiter}${harness.env.PATH || ""}`;
+  harness.env.CONVERGE_LOOP_TEST_UNAVAILABLE_ADAPTERS = "claude";
+  const code = await runCli(["setup", "--smoke", "--json"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const setup = JSON.parse(harness.out.join(""));
+  assert.equal(setup.ok, false);
+  assert.equal(setup.enabled, false);
+  assert.equal(setup.smoke.ok, false);
+  assert.match(setup.smoke.reason, /independent provider coverage/);
+  assert.ok(setup.smoke.diagnostic_path);
+  const config = JSON.parse(fs.readFileSync(setup.config_path, "utf8"));
+  assert.equal(config.enabled, false);
+});
+
+test("setup --smoke refuses fake local cli turn shortcut", async () => {
+  const stateRoot = tempRoot("setup-smoke-fake-refused");
+  const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"));
+  const harness = io(stateRoot);
+  harness.env.PATH = `${binDir}${path.delimiter}${harness.env.PATH || ""}`;
+  harness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE = "1";
+  const code = await runCli(["setup", "--smoke", "--json"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const setup = JSON.parse(harness.out.join(""));
+  assert.equal(setup.ok, false);
+  assert.equal(setup.enabled, false);
+  assert.match(setup.smoke.reason, /cannot run with CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE/);
+  assert.match(setup.warnings.join("\n"), /deterministic tests only/);
 });
 
 test("host aliases select the expected default opposite-agent order", () => {

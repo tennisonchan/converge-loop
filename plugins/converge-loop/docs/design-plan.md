@@ -82,6 +82,13 @@ converge-loop result <session-id>
 converge-loop cancel <session-id>
 ```
 
+Useful `setup` options:
+
+- `--json`: return machine-readable setup status.
+- `--check-only`: run executable, read-only flag, and non-model auth-status checks without writing config or calling models.
+- `--disable`: write disabled local-adapter config.
+- `--smoke`: after normal readiness passes, run a tiny real Codex + Claude adapter exchange before enabling config. This can spend model calls and is not a deterministic CI requirement.
+
 Useful `run` options:
 
 - `--topic <text>`: primary discussion topic.
@@ -153,7 +160,11 @@ The default agent order is primary host first, opposite agent second. That means
 
 Fallback applies only to the implicit default opposite-agent path. If an operator supplies `--agents`, the orchestrator treats the selection as intentional and does not replace a failed participant with the host fallback.
 
-Real local CLI adapters are enabled through `converge-loop setup`, not by asking normal users to set local-adapter environment variables. Setup verifies the local `codex` and `claude` executables plus required read-only flag availability, then writes a readiness config in the converge-loop state directory. Runtime preflight remains fail-closed when setup has not verified the local controls or when the installed CLIs no longer satisfy the same flag checks.
+Real local CLI adapters are enabled through `converge-loop setup`, not by asking normal users to set local-adapter environment variables. Setup verifies the local `codex` and `claude` executables, required read-only flag availability, and non-model auth status, then writes a readiness config in the converge-loop state directory. Runtime preflight remains fail-closed when setup has not verified the local controls/auth status or when the installed CLIs no longer satisfy the same flag checks.
+
+`converge-loop setup --check-only` runs the same executable, flag, and auth-status checks without mutation or model calls. `converge-loop setup --disable` disables config-backed local adapters. `converge-loop setup --smoke` is an optional live-provider proof that uses explicit `codex,claude` participants, disables fallback by construction, requires independent provider coverage, and enables durable config only after the smoke passes.
+
+Codex participant invocations include `--ignore-user-config` so nested participant runs do not inherit host-session hooks or plugin config. Authentication still uses `CODEX_HOME`; setup verifies the flag before enabling the local adapter. Claude participant invocations include `--safe-mode` for the same hook-isolation reason while preserving auth, model selection, built-in tools, and permissions.
 
 When `--agents` and `--roles` are both supplied, they bind positionally: `agents[i]` receives `roles[i]`. If `--agents` is supplied without `--roles`, roles default to `proposer,critic` in agent order. If `--roles` is supplied without `--agents`, the host default participant order is used.
 
@@ -470,7 +481,7 @@ Required test coverage:
 - Session persistence, schema versions, result export, ignored `.converge-loop/` protection, resume, background status, stale detection, and cancel.
 - Read-only enforcement violation handling for attempted edit, patch, commit, nested `converge-loop`, nested `review-loop`, and unauthorized provider-native web use.
 
-Live provider tests are smoke tests only. They should verify adapter preflight and one minimal foreground exchange when credentials are available, but they must not be required for deterministic CI.
+Live provider tests are smoke tests only. They should verify adapter preflight and one minimal foreground exchange when credentials are available, but they must not be required for deterministic CI. `converge-loop setup --smoke` is a local/manual verification path because it may spend model calls.
 
 ## MVP Implementation Plan
 
@@ -490,7 +501,7 @@ Build the runtime in risk-ordered slices. Each slice should leave the repo in a 
 
 4. Real local adapters.
    - Add Codex and Claude local CLI adapters only after their read-only flags, tool-denylist behavior, timeout behavior, control-output support, and host/opposite selection can be proven in preflight.
-   - Acceptance: `converge-loop setup` verifies Codex and Claude local CLI read-only controls and enables config-backed local adapters; adapter preflight fails closed when setup has not succeeded or enforcement is unavailable; host aliases normalize correctly; from Codex, default selection pairs Codex with Claude Code; from Claude Code, default selection pairs Claude Code with Codex; background jobs persist normalized `host_agent`; default opposite-agent unavailability can fall back to the host adapter with degraded disclosure; explicit `--agents` does not fallback implicitly; with available adapters, a minimal foreground two-agent run completes using the same file scope.
+   - Acceptance: `converge-loop setup` verifies Codex and Claude local CLI read-only controls plus non-model auth status and enables config-backed local adapters; `--check-only` is non-mutating; `--disable` turns config-backed adapters off; optional `--smoke` proves a tiny explicit Codex + Claude exchange without fallback before enabling config; adapter preflight fails closed when setup has not succeeded or enforcement is unavailable; host aliases normalize correctly; from Codex, default selection pairs Codex with Claude Code; from Claude Code, default selection pairs Claude Code with Codex; background jobs persist normalized `host_agent`; default opposite-agent unavailability can fall back to the host adapter with degraded disclosure; explicit `--agents` does not fallback implicitly; with available adapters, a minimal foreground two-agent run completes using the same file scope.
 
 5. Shared web scope.
    - Add `--web shared` through an orchestrator-owned search/fetch tool, evidence logging for queries/URLs, and provider-native web disabling checks.

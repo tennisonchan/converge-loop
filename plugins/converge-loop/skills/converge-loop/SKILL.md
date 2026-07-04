@@ -34,7 +34,9 @@ Default participant selection should mirror `review-loop`:
 
 The Codex skill owns `CONVERGE_LOOP_HOST=codex`; users should not need to set host identity manually. The Claude command surface uses `CLAUDE_PLUGIN_ROOT` and lets the runtime infer `claude`.
 
-Run `converge-loop setup` before real local-agent deliberation. Setup verifies local `codex` and `claude` CLIs plus required read-only flag availability, then writes readiness config. Normal users should not need to set local-adapter environment variables.
+Run `converge-loop setup` before real local-agent deliberation. Setup verifies local `codex` and `claude` CLIs, required read-only flag availability, and non-model auth status, then writes readiness config. Normal users should not need to set local-adapter environment variables.
+
+Use `converge-loop setup --check-only` for diagnostics without config mutation or model calls. Use `converge-loop setup --disable` to turn off config-backed local adapters. Use `converge-loop setup --smoke` only when the operator wants a real tiny Codex + Claude adapter exchange and accepts that it may spend model calls.
 
 Do not pass fake adapters for normal user-facing deliberation. `fake-sequence`, `fake-replay`, and `fake-tooling` are deterministic verification adapters only; results from them must be described as smoke/test coverage, not independent provider deliberation.
 
@@ -48,7 +50,7 @@ When helping evolve this plugin:
 4. Do not force disagreement. Encourage constructive pushback, better ideas, evidence requests, and convergence.
 5. Keep human intervention optional unless the operator opts in or interrupts.
 6. Do not add implementation, file edits, or review-gate semantics to `converge-loop`; downstream action belongs to the host agent and deterministic validation belongs to `review-loop`.
-7. Prefer deterministic fake adapters for local verification. Real provider adapters are fail-closed until `converge-loop setup` verifies read-only controls.
+7. Prefer deterministic fake adapters for local verification. Real provider adapters are fail-closed until `converge-loop setup` verifies read-only controls and auth status.
 
 For the current design, read:
 

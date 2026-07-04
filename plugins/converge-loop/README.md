@@ -44,7 +44,13 @@ converge-loop resume <session-id>
 
 The normal installed-skill path is host-aware: Codex pairs with Claude Code, and Claude Code pairs with Codex. The Codex skill sets `CONVERGE_LOOP_HOST=codex`; the Claude Code command uses `CLAUDE_PLUGIN_ROOT` so the runtime infers `claude`. If both plugin-root variables are present, `CLAUDE_PLUGIN_ROOT` is treated as the host signal before `PLUGIN_ROOT`. Direct shell users default to the Codex-hosted order unless they set `CONVERGE_LOOP_HOST` explicitly. Deterministic fake adapters are for verification only.
 
-Run `converge-loop setup` before real local-agent deliberation. Setup verifies the local `codex` and `claude` CLIs and required read-only flag availability, then writes local readiness config under the converge-loop state directory. Normal users should not need to set local-adapter environment variables.
+Run `converge-loop setup` before real local-agent deliberation. Setup verifies the local `codex` and `claude` CLIs, required read-only flag availability, and non-model auth status, then writes local readiness config under the converge-loop state directory. Normal users should not need to set local-adapter environment variables.
+
+Setup controls:
+
+- `converge-loop setup --check-only`: run executable, flag, and auth-status checks without writing config or calling models.
+- `converge-loop setup --disable`: disable config-backed local adapters.
+- `converge-loop setup --smoke`: after normal readiness passes, run a tiny real Codex + Claude adapter exchange before enabling config. This can spend model calls.
 
 If the default opposite-agent path is unavailable, converge-loop may use the primary host adapter as a degraded fallback and will disclose that in the result. If the requested scope cannot be provided symmetrically, such as `--web shared` before shared web support is implemented, the run blocks instead of silently widening or changing access.
 

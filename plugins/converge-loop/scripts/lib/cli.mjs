@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { DEFAULT_RUN_OPTIONS, RESULT_SCHEMA, RESUMABLE_STATUSES } from "./constants.mjs";
-import { checkLocalCliReadiness, resolveHost, writeLocalAdapterConfig } from "./adapters.mjs";
+import { checkLocalCliReadiness, localAdapterConfigPath, readLocalAdapterConfig, resolveHost, writeLocalAdapterConfig } from "./adapters.mjs";
 import { runSession } from "./orchestrator.mjs";
 import { StateStore } from "./state-store.mjs";
 import {
@@ -22,7 +23,7 @@ export async function runCli(argv, io) {
   const command = argv[0] || "help";
   try {
     if (command === "run") return await runRun(argv.slice(1), io);
-    if (command === "setup") return runSetup(argv.slice(1), io);
+    if (command === "setup") return await runSetup(argv.slice(1), io);
     if (command === "status") return runStatus(argv.slice(1), io);
     if (command === "result") return runResult(argv.slice(1), io);
     if (command === "cancel") return runCancel(argv.slice(1), io);
@@ -38,35 +39,169 @@ export async function runCli(argv, io) {
   }
 }
 
-function runSetup(args, io) {
+async function runSetup(args, io) {
   const options = parseSetupArgs(args);
+  const hostAgent = resolveHost(io.env);
+  const warnings = setupWarnings(io.env);
+  if (options.disable) {
+    const payload = {
+      enabled: false,
+      disabled_at: nowIso(),
+      mode: "disable",
+      host_agent: hostAgent,
+      checks: {},
+      read_only_controls: {
+        codex: "sandbox-read-only",
+        claude: "tool-denylist-plan-mode"
+      }
+    };
+    writeLocalAdapterConfig(io.env, payload);
+    const result = {
+      ok: true,
+      enabled: false,
+      mode: "disable",
+      host_agent: hostAgent,
+      config_path: localAdapterConfigPath(io.env),
+      checks: payload.checks,
+      read_only_controls: payload.read_only_controls,
+      verified_at: payload.disabled_at,
+      smoke: { requested: false, ok: null, participants: [] },
+      actions: [{ action: "write-config", status: "disabled" }],
+      warnings,
+      config_changed: true,
+      next_step: "Local Codex and Claude adapters are disabled. Rerun `converge-loop setup` to enable them."
+    };
+    writeSetupResult(result, options, io);
+    return 0;
+  }
+
   const readiness = checkLocalCliReadiness(io.env);
-  const enabled = readiness.ok;
-  const payload = {
-    enabled,
-    verified_at: nowIso(),
-    host_agent: resolveHost(io.env),
-    checks: readiness.checks,
-    read_only_controls: readiness.read_only_controls
-  };
-  writeLocalAdapterConfig(io.env, payload);
+  const verifiedAt = nowIso();
+  const currentConfig = readLocalAdapterConfig(io.env);
+  let enabled = readiness.ok;
+  let smoke = { requested: options.smoke, ok: null, participants: [] };
+  let ok = readiness.ok;
+  if (options.smoke && readiness.ok) {
+    smoke = await runSetupSmoke({ io, hostAgent });
+    ok = readiness.ok && smoke.ok === true;
+    enabled = ok;
+  } else if (options.smoke && !readiness.ok) {
+    smoke = { requested: true, ok: false, participants: [], reason: "readiness checks failed before smoke" };
+    ok = false;
+    enabled = false;
+  }
+
   const result = {
-    ok: readiness.ok,
-    enabled,
-    host_agent: payload.host_agent,
+    ok,
+    enabled: options.checkOnly ? Boolean(currentConfig?.enabled) : enabled,
+    mode: options.checkOnly ? "check-only" : "setup",
+    host_agent: hostAgent,
     config_path: readiness.config_path,
     checks: readiness.checks,
     read_only_controls: readiness.read_only_controls,
-    next_step: readiness.ok
-      ? "Run converge-loop normally; local Codex and Claude adapters are enabled by setup."
+    verified_at: verifiedAt,
+    smoke,
+    actions: [],
+    warnings,
+    config_changed: !options.checkOnly,
+    next_step: ok
+      ? (options.checkOnly
+          ? "Checks passed. Rerun `converge-loop setup` without --check-only to enable local adapters."
+          : "Run converge-loop normally; local Codex and Claude adapters are enabled by setup.")
       : "Install and authenticate Codex and Claude Code, then rerun `converge-loop setup`."
   };
-  if (options.json) {
-    io.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  if (options.checkOnly) {
+    result.actions = [];
+    result.config_changed = false;
   } else {
-    io.stdout.write(renderSetup(result));
+    const payload = {
+      enabled,
+      verified_at: verifiedAt,
+      mode: "setup",
+      host_agent: hostAgent,
+      checks: readiness.checks,
+      read_only_controls: readiness.read_only_controls,
+      smoke
+    };
+    writeLocalAdapterConfig(io.env, payload);
+    result.actions = [{ action: "write-config", status: enabled ? "enabled" : "disabled" }];
   }
+  writeSetupResult(result, options, io);
   return 0;
+}
+
+async function runSetupSmoke({ io, hostAgent }) {
+  if (io.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE === "1") {
+    return {
+      requested: true,
+      ok: false,
+      participants: [],
+      diagnostic_path: null,
+      reason: "setup --smoke cannot run with CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE=1 because it must prove real local CLI invocation"
+    };
+  }
+  const smokeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "converge-loop-smoke-"));
+  const smokeEnv = {
+    ...io.env,
+    CONVERGE_LOOP_STATE_HOME: smokeRoot,
+    CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS: "1"
+  };
+  const smokeOptions = {
+    ...DEFAULT_RUN_OPTIONS,
+    cwd: io.cwd,
+    hostAgent,
+    topic: "converge-loop setup smoke",
+    focus: "This is a readiness smoke, not open-ended deliberation. If your local CLI invocation and control block work, set status to agreed, ready_to_converge to true, and do not ask for follow-up evidence.",
+    scope: "none",
+    web: "off",
+    output: "quiet",
+    maxTurns: 2,
+    maxMinutes: 2,
+    turnTimeoutSeconds: Math.min(DEFAULT_RUN_OPTIONS.turnTimeoutSeconds, 60),
+    agents: ["codex", "claude"],
+    roles: ["proposer", "critic"],
+    json: false,
+    background: false,
+    fixture: null,
+    turnDelayMs: 0
+  };
+  try {
+    const store = StateStore.fromEnv(smokeEnv);
+    const result = await runSession({
+      store,
+      options: smokeOptions,
+      stdout: { write() {} },
+      env: smokeEnv
+    });
+    const participants = result.participants.map((participant) => participant.adapter);
+    const acceptableStatuses = new Set(["agreed", "clear_disagreement"]);
+    const ok = acceptableStatuses.has(result.status) &&
+      result.independent_provider_coverage === true &&
+      Array.isArray(result.fallbacks_used) &&
+      result.fallbacks_used.length === 0 &&
+      participants.join(",") === "codex,claude";
+    if (ok) {
+      fs.rmSync(smokeRoot, { recursive: true, force: true });
+    }
+    return {
+      requested: true,
+      ok,
+      status: result.status,
+      participants,
+      independent_provider_coverage: result.independent_provider_coverage,
+      fallbacks_used: result.fallbacks_used || [],
+      diagnostic_path: ok ? null : smokeRoot,
+      reason: ok ? null : "smoke result did not prove real codex+claude independent provider coverage"
+    };
+  } catch (error) {
+    return {
+      requested: true,
+      ok: false,
+      participants: [],
+      diagnostic_path: smokeRoot,
+      reason: error.message
+    };
+  }
 }
 
 export function parseRunArgs(args, io) {
@@ -299,11 +434,17 @@ function parseResultArgs(args) {
 }
 
 function parseSetupArgs(args) {
-  const options = { json: false };
+  const options = { json: false, checkOnly: false, disable: false, smoke: false };
   for (const arg of args) {
     if (arg === "--json") options.json = true;
+    else if (arg === "--check-only") options.checkOnly = true;
+    else if (arg === "--disable") options.disable = true;
+    else if (arg === "--smoke") options.smoke = true;
     else throw new Error(`unknown setup option: ${arg}`);
   }
+  if (options.disable && options.checkOnly) throw new Error("--disable cannot be combined with --check-only");
+  if (options.disable && options.smoke) throw new Error("--disable cannot be combined with --smoke");
+  if (options.checkOnly && options.smoke) throw new Error("--check-only cannot be combined with --smoke");
   return options;
 }
 
@@ -421,6 +562,7 @@ function renderSetup(result) {
   const status = result.ok ? "ready" : "not ready";
   const lines = [
     `converge-loop setup: ${status}`,
+    `mode: ${result.mode}`,
     `host: ${result.host_agent}`,
     `config: ${result.config_path}`,
     "",
@@ -428,6 +570,18 @@ function renderSetup(result) {
   ];
   for (const [name, check] of Object.entries(result.checks)) {
     lines.push(`  ${name}: ${check.ok ? "ok" : `blocked - ${check.reason}`}`);
+    if (check.auth) {
+      lines.push(`    auth: ${check.auth.ok ? "ok" : `blocked - ${check.auth.reason}`}`);
+    }
+  }
+  if (result.smoke?.requested) {
+    lines.push("", `Smoke: ${result.smoke.ok ? "ok" : `blocked - ${result.smoke.reason || "failed"}`}`);
+  }
+  if (result.warnings?.length) {
+    lines.push("", "Warnings:");
+    for (const warning of result.warnings) {
+      lines.push(`  - ${warning}`);
+    }
   }
   lines.push("", result.next_step, "");
   return lines.join("\n");
@@ -435,7 +589,7 @@ function renderSetup(result) {
 
 function helpText() {
   return `Usage:
-  converge-loop setup [--json]
+  converge-loop setup [--json] [--check-only] [--disable] [--smoke]
   converge-loop run [options]
   converge-loop status [session-id]
   converge-loop result <session-id> [--export <path>] [--allow-versioned-export]
@@ -447,4 +601,23 @@ Run examples:
   converge-loop run --topic "Improve this plan"
   converge-loop run --artifact plan.md --focus "Ask for pushback"
 `;
+}
+
+function setupWarnings(env) {
+  const warnings = [];
+  if (env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS === "1") {
+    warnings.push("CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS=1 overrides setup config and enables local adapters.");
+  }
+  if (env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE === "1") {
+    warnings.push("CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE=1 is for deterministic tests only; setup --smoke will refuse to enable config from fake turns.");
+  }
+  return warnings;
+}
+
+function writeSetupResult(result, options, io) {
+  if (options.json) {
+    io.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  } else {
+    io.stdout.write(renderSetup(result));
+  }
 }
