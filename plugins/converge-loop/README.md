@@ -12,6 +12,8 @@ This plugin package contains the product design, plugin scaffold, and Node.js co
 ## Current Contents
 
 - `.codex-plugin/plugin.json`: Codex plugin manifest.
+- `.claude-plugin/plugin.json`: Claude Code plugin manifest.
+- `commands/converge-loop.md`: Claude Code command surface.
 - `skills/converge-loop/SKILL.md`: skill surface for when to use the command.
 - `scripts/bin/converge-loop.mjs`: command entrypoint.
 - `scripts/lib/`: runtime modules for CLI parsing, orchestration, adapters, and state.
@@ -25,22 +27,22 @@ From the repository root, enter the plugin directory and run the command with No
 
 ```bash
 cd plugins/converge-loop
-CONVERGE_LOOP_HOST=akx node scripts/bin/converge-loop.mjs run --topic "Improve this plan"
+node scripts/bin/converge-loop.mjs run --topic "Improve this plan"
 ```
 
 After package linking, package installation, or Codex plugin installation, use the bin directly:
 
 ```bash
-CONVERGE_LOOP_HOST=akx converge-loop run --topic "Improve this plan"
+converge-loop run --topic "Improve this plan"
 converge-loop status
 converge-loop result <session-id>
 converge-loop cancel <session-id>
 converge-loop resume <session-id>
 ```
 
-The normal installed-skill path should use the host-aware default pairing: `akx` / Codex pairs with `akc` / Claude Code, and `akc` pairs with `akx`. The host plugin should set `CONVERGE_LOOP_HOST=akx` or `CONVERGE_LOOP_HOST=akc`; shell users can set it explicitly. Deterministic fake adapters are for verification only. Real `codex` and `claude` adapter scaffolds fail closed unless `CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS=1` is set and read-only preflight checks pass.
+The normal installed-skill path is host-aware: Codex pairs with Claude Code, and Claude Code pairs with Codex. The Codex skill sets `CONVERGE_LOOP_HOST=codex`; the Claude Code command uses `CLAUDE_PLUGIN_ROOT` so the runtime infers `claude`. If both plugin-root variables are present, `CLAUDE_PLUGIN_ROOT` is treated as the host signal before `PLUGIN_ROOT`. Direct shell users default to the Codex-hosted order unless they set `CONVERGE_LOOP_HOST` explicitly. Deterministic fake adapters are for verification only. Real `codex` and `claude` adapter scaffolds fail closed unless `CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS=1` is set and read-only preflight checks pass.
 
-Until the real-adapter slice is fully enabled in your environment, the bare command may return a blocked fail-closed result. For installation smoke tests only, use `--agents fake-sequence,fake-sequence` and treat the result as deterministic test coverage, not independent provider deliberation.
+If the default opposite-agent path is unavailable, converge-loop may use the primary host adapter as a degraded fallback and will disclose that in the result. If the requested scope cannot be provided symmetrically, such as `--web shared` before shared web support is implemented, the run blocks instead of silently widening or changing access.
 
 ## Verification
 

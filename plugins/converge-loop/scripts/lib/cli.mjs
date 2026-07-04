@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_RUN_OPTIONS, RESULT_SCHEMA, RESUMABLE_STATUSES } from "./constants.mjs";
-import { normalizeHostAgent } from "./adapters.mjs";
+import { resolveHost } from "./adapters.mjs";
 import { runSession } from "./orchestrator.mjs";
 import { StateStore } from "./state-store.mjs";
 import {
@@ -41,7 +41,7 @@ export function parseRunArgs(args, io) {
   const options = {
     ...DEFAULT_RUN_OPTIONS,
     cwd: io.cwd,
-    hostAgent: normalizeHostAgent(io.env.CONVERGE_LOOP_HOST),
+    hostAgent: resolveHost(io.env),
     sessionId: null,
     fixture: null,
     turnDelayMs: 0,
@@ -148,7 +148,8 @@ function startBackgroundRun(originalArgs, options, io, store) {
     last_heartbeat_at: nowIso(),
     status: "starting",
     session_path: store.sessionPath(sessionId),
-    turn_timeout_seconds: options.turnTimeoutSeconds
+    turn_timeout_seconds: options.turnTimeoutSeconds,
+    host_agent: options.hostAgent
   });
   const child = spawn(process.execPath, childArgs, {
     cwd: io.cwd,
@@ -212,11 +213,11 @@ function runCancel(args, io) {
   if (!job) throw new Error(`no background job found for ${sessionId}`);
   if (processExists(job.pid)) {
     process.kill(job.pid, "SIGTERM");
-    ensureCanceledResult({ store, sessionId, job });
+    ensureCanceledResult({ store, sessionId, job, env: io.env });
     store.writeJob(sessionId, { ...job, status: "canceling", last_heartbeat_at: nowIso() });
     io.stdout.write(`${sessionId} canceling\n`);
   } else {
-    ensureCanceledResult({ store, sessionId, job });
+    ensureCanceledResult({ store, sessionId, job, env: io.env });
     store.writeJob(sessionId, { ...job, status: "stale", last_heartbeat_at: nowIso() });
     io.stdout.write(`${sessionId} stale\n`);
   }
@@ -312,8 +313,9 @@ function withDerivedJobStatus(job) {
   };
 }
 
-function ensureCanceledResult({ store, sessionId, job }) {
+function ensureCanceledResult({ store, sessionId, job, env = process.env }) {
   if (store.resultExists(sessionId)) return;
+  const hostAgent = job.host_agent || resolveHost(env);
   let session;
   try {
     session = store.loadSession(sessionId);
@@ -321,7 +323,7 @@ function ensureCanceledResult({ store, sessionId, job }) {
     session = store.createSession({
       sessionId,
       cwd: job.cwd,
-      options: { cwd: job.cwd, scope: "none", web: "off", output: "quiet" },
+      options: { cwd: job.cwd, scope: "none", web: "off", output: "quiet", hostAgent },
       participants: []
     });
   }
@@ -334,7 +336,7 @@ function ensureCanceledResult({ store, sessionId, job }) {
     summary: "Background session canceled before completion.",
     conclusion_path: "conclusion.md",
     turn_count: store.readTurns(sessionId).length,
-    host_agent: "codex",
+    host_agent: session.options?.hostAgent || hostAgent,
     participants: session.participants || [],
     independent_provider_coverage: false,
     fallbacks_used: [],
@@ -383,7 +385,7 @@ function helpText() {
   converge-loop resume <session-id>
 
 Run examples:
-  CONVERGE_LOOP_HOST=akx converge-loop run --topic "Improve this plan"
+  converge-loop run --topic "Improve this plan"
   converge-loop run --artifact plan.md --focus "Ask for pushback"
 `;
 }

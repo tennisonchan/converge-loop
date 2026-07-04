@@ -109,6 +109,26 @@ test("host aliases select the expected default opposite-agent order", () => {
   );
 });
 
+test("plugin root environment infers host when explicit host is unset", () => {
+  const options = { agents: null, roles: null };
+  assert.deepEqual(
+    buildParticipants(options, { CLAUDE_PLUGIN_ROOT: repoRoot }).map((participant) => participant.adapter),
+    ["claude", "codex"]
+  );
+  assert.deepEqual(
+    buildParticipants(options, { PLUGIN_ROOT: repoRoot }).map((participant) => participant.adapter),
+    ["codex", "claude"]
+  );
+  assert.deepEqual(
+    buildParticipants(options, { CLAUDE_PLUGIN_ROOT: repoRoot, PLUGIN_ROOT: repoRoot }).map((participant) => participant.adapter),
+    ["claude", "codex"]
+  );
+  assert.deepEqual(
+    buildParticipants(options, { CONVERGE_LOOP_HOST: "akx", CLAUDE_PLUGIN_ROOT: repoRoot }).map((participant) => participant.adapter),
+    ["codex", "claude"]
+  );
+});
+
 test("run fails fast for unsupported explicit host", async () => {
   const stateRoot = tempRoot("bad-host");
   const harness = io(stateRoot);
@@ -125,7 +145,7 @@ test("run fails fast for unsupported explicit host", async () => {
 test("host aliases are recorded as normalized host_agent values", async () => {
   const stateRoot = tempRoot("host-record");
   const harness = io(stateRoot);
-  harness.env.CONVERGE_LOOP_HOST = "akc";
+  harness.env.CLAUDE_PLUGIN_ROOT = repoRoot;
   const code = await runCli([
     "run",
     "--agents",
@@ -138,11 +158,62 @@ test("host aliases are recorded as normalized host_agent values", async () => {
   assert.equal(JSON.parse(harness.out.join("")).host_agent, "claude");
 });
 
+test("background job records host and cancel-before-init preserves it", async () => {
+  const stateRoot = tempRoot("cancel-host");
+  const harness = io(stateRoot);
+  harness.env.CLAUDE_PLUGIN_ROOT = repoRoot;
+  const runCode = await runCli([
+    "run",
+    "--agents",
+    "fake-sequence,fake-sequence",
+    "--topic",
+    "cancel before init",
+    "--turn-delay-ms",
+    "500",
+    "--background"
+  ], harness);
+  assert.equal(runCode, 0, harness.err.join(""));
+  const sessionId = harness.out.join("").trim();
+  const job = JSON.parse(fs.readFileSync(path.join(stateRoot, "jobs", `${sessionId}.json`), "utf8"));
+  assert.equal(job.host_agent, "claude");
+  fs.rmSync(path.join(stateRoot, "sessions", sessionId), { recursive: true, force: true });
+  const cancelHarness = io(stateRoot);
+  cancelHarness.env.CLAUDE_PLUGIN_ROOT = repoRoot;
+  const cancelCode = await runCli(["cancel", sessionId], cancelHarness);
+  assert.equal(cancelCode, 0, cancelHarness.err.join(""));
+  assert.equal(readResult(stateRoot, sessionId).host_agent, "claude");
+});
+
+test("claude command surface is discoverable as a single command", () => {
+  const manifestPath = path.join(repoRoot, ".claude-plugin", "plugin.json");
+  const commandDir = path.join(repoRoot, "commands");
+  const commandPath = path.join(commandDir, "converge-loop.md");
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  assert.equal(manifest.name, "converge-loop");
+  assert.equal(manifest.version, "0.1.0");
+  assert.equal(typeof manifest.description, "string");
+  assert.equal(manifest.author?.name, "Tennison Chan");
+  assert.deepEqual(fs.readdirSync(commandDir), ["converge-loop.md"]);
+  const command = fs.readFileSync(commandPath, "utf8");
+  assert.match(command, /CLAUDE_PLUGIN_ROOT/);
+  assert.doesNotMatch(command, /CONVERGE_LOOP_HOST/);
+});
+
 test("help presents host-aware run example before fake adapter smoke paths", async () => {
   const result = await cli(["help"]);
   assert.equal(result.code, 0, result.stderr);
-  assert.match(result.stdout, /CONVERGE_LOOP_HOST=akx converge-loop run --topic/);
+  assert.match(result.stdout, /converge-loop run --topic/);
+  assert.doesNotMatch(result.stdout, /CONVERGE_LOOP_HOST=akx/);
   assert.doesNotMatch(result.stdout, /fake-sequence,fake-sequence/);
+});
+
+test("codex skill owns codex host identity without exposing old akx setup", () => {
+  const skill = fs.readFileSync(path.join(repoRoot, "skills/converge-loop/SKILL.md"), "utf8");
+  assert.match(skill, /CONVERGE_LOOP_HOST=codex converge-loop run/);
+  assert.match(skill, /CONVERGE_LOOP_HOST=codex node scripts\/bin\/converge-loop\.mjs run/);
+  assert.match(skill, /CLAUDE_PLUGIN_ROOT/);
+  assert.doesNotMatch(skill, /CONVERGE_LOOP_HOST=akx/);
+  assert.doesNotMatch(skill, /CONVERGE_LOOP_HOST=akc/);
 });
 
 test("fixture coverage includes terminal statuses", async () => {
@@ -271,6 +342,56 @@ test("local cli adapter preflight can be exercised without enabling unsafe execu
   harness.env.CONVERGE_LOOP_ASSUME_LOCAL_CLI_PREFLIGHT = "1";
   const result = await runCli(["run", "--agents", "codex,claude", "--topic", "preflight", "--web", "shared", "--json"], harness);
   assert.equal(result, 0);
+  const parsed = JSON.parse(harness.out.join(""));
+  assert.equal(parsed.status, "blocked");
+  assert.match(parsed.summary, /shared web adapter execution is not implemented/);
+});
+
+test("default opposite-agent preflight can fall back to degraded host participant", async () => {
+  const stateRoot = tempRoot("fallback");
+  const harness = io(stateRoot);
+  harness.env.CONVERGE_LOOP_HOST = "codex";
+  harness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS = "1";
+  harness.env.CONVERGE_LOOP_ASSUME_LOCAL_CLI_PREFLIGHT = "1";
+  harness.env.CONVERGE_LOOP_TEST_UNAVAILABLE_ADAPTERS = "claude";
+  harness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE = "1";
+  const code = await runCli(["run", "--topic", "fallback", "--json"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const parsed = JSON.parse(harness.out.join(""));
+  assert.equal(parsed.status, "agreed");
+  assert.equal(parsed.independent_provider_coverage, false);
+  assert.match(parsed.summary, /degraded fallback/i);
+  assert.deepEqual(parsed.participants.map((participant) => participant.adapter), ["codex", "codex"]);
+  assert.equal(parsed.participants[1].tier, "fallback");
+  assert.equal(parsed.participants[1].fallback_for, "claude");
+  assert.equal(parsed.fallbacks_used.length, 1);
+  const sessionId = findSingleSessionId(stateRoot);
+  const transcript = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "transcript.md"), "utf8");
+  assert.match(transcript, /degraded fallback/i);
+});
+
+test("explicit agents do not use degraded fallback implicitly", async () => {
+  const stateRoot = tempRoot("explicit-no-fallback");
+  const harness = io(stateRoot);
+  harness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS = "1";
+  harness.env.CONVERGE_LOOP_ASSUME_LOCAL_CLI_PREFLIGHT = "1";
+  harness.env.CONVERGE_LOOP_TEST_UNAVAILABLE_ADAPTERS = "claude";
+  const code = await runCli(["run", "--agents", "codex,claude", "--topic", "explicit", "--json"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const parsed = JSON.parse(harness.out.join(""));
+  assert.equal(parsed.status, "blocked");
+  assert.match(parsed.summary, /claude adapter forced unavailable/);
+  assert.equal(parsed.fallbacks_used.length, 0);
+});
+
+test("shared web remains fail-closed under current local adapter capabilities", async () => {
+  const stateRoot = tempRoot("shared-web-block");
+  const harness = io(stateRoot);
+  harness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS = "1";
+  harness.env.CONVERGE_LOOP_ASSUME_LOCAL_CLI_PREFLIGHT = "1";
+  harness.env.CONVERGE_LOOP_TEST_UNAVAILABLE_ADAPTERS = "claude";
+  const code = await runCli(["run", "--topic", "shared web", "--web", "shared", "--json"], harness);
+  assert.equal(code, 0, harness.err.join(""));
   const parsed = JSON.parse(harness.out.join(""));
   assert.equal(parsed.status, "blocked");
   assert.match(parsed.summary, /shared web adapter execution is not implemented/);

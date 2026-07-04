@@ -142,13 +142,16 @@ Default participant selection is host-aware and deterministic:
 
 - `akx` / Codex-hosted sessions use Codex as the primary participant and `akc` / Claude Code as the secondary participant.
 - `akc` / Claude Code-hosted sessions use Claude Code as the primary participant and `akx` / Codex as the secondary participant.
-- CLI-only sessions without a known host infer the host from `CONVERGE_LOOP_HOST`; if unset, they default to the Codex-hosted order.
-- If the preferred opposite-provider adapter is unavailable or unauthenticated, the orchestrator uses an explicitly configured alternate provider when present.
+- CLI-only sessions without a known host infer the host from `CONVERGE_LOOP_HOST`; if unset, they infer `claude` from `CLAUDE_PLUGIN_ROOT`, infer `codex` from `PLUGIN_ROOT`, then default to the Codex-hosted order. If both plugin-root variables are present, `CLAUDE_PLUGIN_ROOT` wins over `PLUGIN_ROOT`.
+- Explicit `CONVERGE_LOOP_HOST` wins over plugin-root inference.
+- If the preferred opposite-provider adapter is unavailable or unauthenticated in the default participant order, the orchestrator uses an explicitly configured alternate provider when present.
 - If no external alternate is available, the orchestrator uses the primary agent's sub-agent fallback and marks coverage as degraded.
 
-Host identity must be normalized before participant selection. `akx`, `codex`, and `openai` are Codex-host aliases. `akc`, `claude`, `claude-code`, and `anthropic` are Claude-host aliases. Host integrations should set `CONVERGE_LOOP_HOST` explicitly. An unset host defaults to the Codex-hosted order for CLI-only use; an explicitly unknown host value fails closed.
+Host identity must be normalized before participant selection. `akx`, `codex`, and `openai` are Codex-host aliases. `akc`, `claude`, `claude-code`, and `anthropic` are Claude-host aliases. The Codex skill sets `CONVERGE_LOOP_HOST=codex`; the Claude Code command uses `CLAUDE_PLUGIN_ROOT` and lets the runtime infer `claude`. An unset host defaults to the Codex-hosted order for CLI-only use; an explicitly unknown host value fails closed.
 
 The default agent order is primary host first, opposite agent second. That means the operator should usually invoke `converge-loop run ...` without `--agents`. `--agents` is an override for diagnostics, tests, or intentionally non-default pairings, not the standard skill path.
+
+Fallback applies only to the implicit default opposite-agent path. If an operator supplies `--agents`, the orchestrator treats the selection as intentional and does not replace a failed participant with the host fallback.
 
 When `--agents` and `--roles` are both supplied, they bind positionally: `agents[i]` receives `roles[i]`. If `--agents` is supplied without `--roles`, roles default to `proposer,critic` in agent order. If `--roles` is supplied without `--agents`, the host default participant order is used.
 
@@ -485,7 +488,7 @@ Build the runtime in risk-ordered slices. Each slice should leave the repo in a 
 
 4. Real local adapters.
    - Add Codex and Claude local CLI adapters only after their read-only flags, tool-denylist behavior, timeout behavior, control-output support, and host/opposite selection can be proven in preflight.
-   - Acceptance: adapter preflight fails closed when enforcement is unavailable; host aliases normalize correctly; from `akx`, default selection pairs Codex with `akc`; from `akc`, default selection pairs Claude Code with `akx`; with available adapters, a minimal foreground two-agent run completes using the same file scope.
+   - Acceptance: adapter preflight fails closed when enforcement is unavailable; host aliases normalize correctly; from Codex, default selection pairs Codex with Claude Code; from Claude Code, default selection pairs Claude Code with Codex; background jobs persist normalized `host_agent`; default opposite-agent unavailability can fall back to the host adapter with degraded disclosure; explicit `--agents` does not fallback implicitly; with available adapters, a minimal foreground two-agent run completes using the same file scope.
 
 5. Shared web scope.
    - Add `--web shared` through an orchestrator-owned search/fetch tool, evidence logging for queries/URLs, and provider-native web disabling checks.
