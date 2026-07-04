@@ -15,7 +15,7 @@ const BASE_FAKE_CAPABILITIES = {
 };
 
 export function buildParticipants(options, env = process.env) {
-  const host = normalizeHostAgent(env.CONVERGE_LOOP_HOST);
+  const host = options.hostAgent || resolveHost(env);
   const agents = options.agents || (host === "claude" ? ["claude", "codex"] : ["codex", "claude"]);
   const roles = options.roles || ["proposer", "critic"];
   return agents.map((adapter, index) => {
@@ -33,37 +33,92 @@ export function buildParticipants(options, env = process.env) {
 
 export function normalizeHostAgent(value) {
   const normalized = String(value || "").trim().toLowerCase();
-  if (!normalized) return "codex";
+  if (!normalized) return null;
   if (["akc", "claude", "claude-code", "anthropic"].includes(normalized)) return "claude";
   if (["akx", "codex", "openai"].includes(normalized)) return "codex";
   throw new Error(`unsupported CONVERGE_LOOP_HOST: ${value}`);
 }
 
+export function resolveHost(env = process.env) {
+  const explicit = normalizeHostAgent(env.CONVERGE_LOOP_HOST);
+  if (explicit) return explicit;
+  if (env.CLAUDE_PLUGIN_ROOT) return "claude";
+  if (env.PLUGIN_ROOT) return "codex";
+  return "codex";
+}
+
 export function preflightParticipants(participants, options, env = process.env) {
-  const checked = participants.map((participant) => {
-    const adapter = getAdapter(participant.adapter, env);
-    const preflight = adapter.preflight({ participant, options, env });
-    return { participant, adapter, preflight };
-  });
+  const checked = checkParticipants(participants, options, env);
   const failed = checked.find((entry) => !entry.preflight.ok);
   if (failed) {
+    const fallback = maybeBuildFallback({ participants, options, env, failed });
+    if (fallback) {
+      const fallbackChecked = checkParticipants(fallback.participants, options, env);
+      const fallbackFailure = firstPreflightOrCapabilityFailure(fallbackChecked, options);
+      if (!fallbackFailure) {
+        return { ok: true, checked: fallbackChecked, participants: fallback.participants };
+      }
+      return {
+        ok: false,
+        reason: `${failed.participant.adapter} unavailable: ${failed.preflight.reason}; degraded fallback ${fallback.adapter} unavailable: ${fallbackFailure.reason}`,
+        checked: fallbackChecked,
+        participants: fallback.participants
+      };
+    }
     return {
       ok: false,
       reason: failed.preflight.reason,
       checked
     };
   }
+  const capabilityFailure = firstCapabilityFailure(checked, options);
+  if (capabilityFailure) return { ...capabilityFailure, checked };
+  return { ok: true, checked };
+}
+
+function checkParticipants(participants, options, env) {
+  return participants.map((participant) => {
+    const adapter = getAdapter(participant.adapter, env);
+    const preflight = adapter.preflight({ participant, options, env });
+    return { participant, adapter, preflight };
+  });
+}
+
+function maybeBuildFallback({ participants, options, env, failed }) {
+  if (options.agents) return null;
+  const failedIndex = participants.findIndex((participant) => participant.id === failed.participant.id);
+  if (failedIndex !== 1) return null;
+  const fallbackAdapter = options.hostAgent || resolveHost(env);
+  const participant = {
+    ...failed.participant,
+    adapter: fallbackAdapter,
+    provider: providerFor(fallbackAdapter),
+    tier: "fallback",
+    fallback_for: failed.participant.adapter
+  };
+  const fallbackParticipants = participants.slice();
+  fallbackParticipants[failedIndex] = participant;
+  return { adapter: fallbackAdapter, participants: fallbackParticipants };
+}
+
+function firstPreflightOrCapabilityFailure(checked, options) {
+  const failed = checked.find((entry) => !entry.preflight.ok);
+  if (failed) return { reason: failed.preflight.reason };
+  return firstCapabilityFailure(checked, options);
+}
+
+function firstCapabilityFailure(checked, options) {
   const scopes = checked.map((entry) => entry.preflight.capabilities.file_scope);
   const webScopes = checked.map((entry) => entry.preflight.capabilities.web_scope);
   const supportsScope = scopes.every((values) => values.includes(options.scope));
   const supportsWeb = webScopes.every((values) => values.includes(options.web));
   if (!supportsScope) {
-    return { ok: false, reason: `requested file scope '${options.scope}' is not supported by all participants`, checked };
+    return { ok: false, reason: `requested file scope '${options.scope}' is not supported by all participants` };
   }
   if (!supportsWeb) {
-    return { ok: false, reason: `requested web scope '${options.web}' is not supported by all participants`, checked };
+    return { ok: false, reason: `requested web scope '${options.web}' is not supported by all participants` };
   }
-  return { ok: true, checked };
+  return null;
 }
 
 export function getAdapter(name, env = process.env) {
@@ -136,6 +191,9 @@ class LocalCliAdapter {
   }
 
   preflight({ options, env }) {
+    if (testUnavailableAdapters(env).includes(this.name)) {
+      return { ok: false, reason: `${this.name} adapter forced unavailable by test preflight` };
+    }
     if (env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS !== "1") {
       return {
         ok: false,
@@ -186,6 +244,9 @@ class LocalCliAdapter {
   }
 
   async invoke({ participant, options, prompt, nonce }) {
+    if (this.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE === "1") {
+      return defaultFakeTurn({ participant, turnIndex: options.__turnIndex || 0, options });
+    }
     const command = this.name;
     const args = this.name === "codex"
       ? ["exec", "--sandbox", "read-only", "--ask-for-approval", "never", "--cd", options.cwd, "-"]
@@ -202,6 +263,13 @@ class LocalCliAdapter {
     const output = await runWithTimeout(command, args, this.name === "codex" ? prompt : null, options.turnTimeoutSeconds * 1000);
     return parseParticipantOutput(output, { nonce, participant });
   }
+}
+
+function testUnavailableAdapters(env) {
+  return String(env.CONVERGE_LOOP_TEST_UNAVAILABLE_ADAPTERS || "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
 }
 
 function defaultFakeTurn({ participant, turnIndex, options }) {

@@ -7,16 +7,20 @@ import { hasMaterialPushback, hasProgress, normalizeControl, parseParticipantOut
 import { nowIso, sha256 } from "./util.mjs";
 
 export async function runSession({ store, options, stdout, env, sessionId = null, resume = false, signal = null }) {
-  const participants = resume
+  let participants = resume
     ? store.loadSession(sessionId).participants
     : buildParticipants(options, env);
   const preflight = preflightParticipants(participants, options, env);
+  if (preflight.participants) {
+    participants = preflight.participants;
+  }
   let session;
   if (resume) {
     session = store.loadSession(sessionId);
     const resumedFrom = session.state;
     session.state = "running";
     session.options = { ...session.options, ...options, resumed_from: resumedFrom };
+    session.participants = participants;
     store.writeSession(session);
     store.writeTranscript(session.id, `\n## Resume ${nowIso()}\n\n`);
   } else {
@@ -27,6 +31,7 @@ export async function runSession({ store, options, stdout, env, sessionId = null
       participants
     });
   }
+  writeFallbackDisclosure({ store, session, participants, active: preflight.ok });
 
   if (!preflight.ok) {
     const result = buildResult({
@@ -100,7 +105,7 @@ export async function runSession({ store, options, stdout, env, sessionId = null
     const prompt = buildTurnPrompt({ options, participant, transcript, nonce });
     let parsed;
     try {
-      const raw = await adapter.invoke({ participant, turnIndex, options, transcript, prompt, nonce });
+      const raw = await adapter.invoke({ participant, turnIndex, options: { ...options, __turnIndex: turnIndex }, transcript, prompt, nonce });
       if (raw?.violation) {
         parsed = {
           message: raw.message || "Adapter reported a read-only enforcement violation.",
@@ -263,16 +268,20 @@ export async function runSession({ store, options, stdout, env, sessionId = null
 }
 
 function buildResult({ session, participants, status, summary, turnCount, agreements, improvements, remainingDisagreements, evidenceSummary }) {
+  const fallbacks = participants.filter((p) => p.fallback_for);
+  const fallbackSummary = fallbacks.length
+    ? ` Degraded fallback coverage: ${fallbacks.map((p) => `${p.adapter} handled ${p.fallback_for}`).join(", ")}.`
+    : "";
   return {
     schema_version: RESULT_SCHEMA,
     status,
-    summary,
+    summary: `${summary}${fallbackSummary}`,
     conclusion_path: "conclusion.md",
     turn_count: turnCount,
     host_agent: session.options.hostAgent || "codex",
     participants,
     independent_provider_coverage: independentCoverage(participants),
-    fallbacks_used: participants.filter((p) => p.fallback_for),
+    fallbacks_used: fallbacks,
     scope: session.options.scope,
     web_scope: session.options.web,
     output_mode: session.options.output,
@@ -286,6 +295,23 @@ function buildResult({ session, participants, status, summary, turnCount, agreem
     transcript_path: "transcript.md",
     evidence_ledger_path: "evidence-ledger.jsonl"
   };
+}
+
+function writeFallbackDisclosure({ store, session, participants, active }) {
+  const fallbacks = participants.filter((participant) => participant.fallback_for);
+  if (!fallbacks.length) return;
+  const heading = active ? "Degraded fallback coverage" : "Attempted degraded fallback";
+  const lines = fallbacks.map((participant) => active
+    ? `- ${participant.adapter} is a degraded fallback for ${participant.fallback_for}.`
+    : `- ${participant.adapter} was attempted as a degraded fallback for ${participant.fallback_for}, but preflight blocked before participant turns ran.`);
+  const transcriptPath = store.sessionFile(session.id, "transcript.md");
+  const transcript = fs.existsSync(transcriptPath) ? fs.readFileSync(transcriptPath, "utf8") : "";
+  const body = lines.join("\n");
+  if (transcript.includes(`## ${heading}`) && transcript.includes(body)) return;
+  const note = active
+    ? "This is not independent opposite-provider coverage."
+    : "No degraded fallback coverage was used.";
+  store.writeTranscript(session.id, `\n## ${heading}\n\n${body}\n\n${note}\n\n`);
 }
 
 function finishSession({ store, session, result, conclusion }) {
