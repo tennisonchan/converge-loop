@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_RUN_OPTIONS, RESULT_SCHEMA, RESUMABLE_STATUSES } from "./constants.mjs";
-import { resolveHost } from "./adapters.mjs";
+import { checkLocalCliReadiness, resolveHost, writeLocalAdapterConfig } from "./adapters.mjs";
 import { runSession } from "./orchestrator.mjs";
 import { StateStore } from "./state-store.mjs";
 import {
@@ -22,6 +22,7 @@ export async function runCli(argv, io) {
   const command = argv[0] || "help";
   try {
     if (command === "run") return await runRun(argv.slice(1), io);
+    if (command === "setup") return runSetup(argv.slice(1), io);
     if (command === "status") return runStatus(argv.slice(1), io);
     if (command === "result") return runResult(argv.slice(1), io);
     if (command === "cancel") return runCancel(argv.slice(1), io);
@@ -35,6 +36,37 @@ export async function runCli(argv, io) {
     io.stderr.write(`${error.message}\n`);
     return 1;
   }
+}
+
+function runSetup(args, io) {
+  const options = parseSetupArgs(args);
+  const readiness = checkLocalCliReadiness(io.env);
+  const enabled = readiness.ok;
+  const payload = {
+    enabled,
+    verified_at: nowIso(),
+    host_agent: resolveHost(io.env),
+    checks: readiness.checks,
+    read_only_controls: readiness.read_only_controls
+  };
+  writeLocalAdapterConfig(io.env, payload);
+  const result = {
+    ok: readiness.ok,
+    enabled,
+    host_agent: payload.host_agent,
+    config_path: readiness.config_path,
+    checks: readiness.checks,
+    read_only_controls: readiness.read_only_controls,
+    next_step: readiness.ok
+      ? "Run converge-loop normally; local Codex and Claude adapters are enabled by setup."
+      : "Install and authenticate Codex and Claude Code, then rerun `converge-loop setup`."
+  };
+  if (options.json) {
+    io.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  } else {
+    io.stdout.write(renderSetup(result));
+  }
+  return 0;
 }
 
 export function parseRunArgs(args, io) {
@@ -266,6 +298,15 @@ function parseResultArgs(args) {
   return options;
 }
 
+function parseSetupArgs(args) {
+  const options = { json: false };
+  for (const arg of args) {
+    if (arg === "--json") options.json = true;
+    else throw new Error(`unknown setup option: ${arg}`);
+  }
+  return options;
+}
+
 function parseResumeOverrides(args, io) {
   if (!args.length) return {};
   const options = {};
@@ -376,8 +417,25 @@ function splitList(value) {
   return value.split(",").map((entry) => entry.trim()).filter(Boolean);
 }
 
+function renderSetup(result) {
+  const status = result.ok ? "ready" : "not ready";
+  const lines = [
+    `converge-loop setup: ${status}`,
+    `host: ${result.host_agent}`,
+    `config: ${result.config_path}`,
+    "",
+    "Checks:"
+  ];
+  for (const [name, check] of Object.entries(result.checks)) {
+    lines.push(`  ${name}: ${check.ok ? "ok" : `blocked - ${check.reason}`}`);
+  }
+  lines.push("", result.next_step, "");
+  return lines.join("\n");
+}
+
 function helpText() {
   return `Usage:
+  converge-loop setup [--json]
   converge-loop run [options]
   converge-loop status [session-id]
   converge-loop result <session-id> [--export <path>] [--allow-versioned-export]
@@ -385,6 +443,7 @@ function helpText() {
   converge-loop resume <session-id>
 
 Run examples:
+  converge-loop setup
   converge-loop run --topic "Improve this plan"
   converge-loop run --artifact plan.md --focus "Ask for pushback"
 `;

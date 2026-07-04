@@ -1,6 +1,6 @@
 ---
-description: Run converge-loop deliberation with the opposite-agent participant
-argument-hint: 'run [options] | status [session-id] | result <session-id> | cancel <session-id> | resume <session-id>'
+description: Run converge-loop setup and deliberation with the opposite-agent participant
+argument-hint: 'setup [--json] | run [options] | status [session-id] | result <session-id> | cancel <session-id> | resume <session-id>'
 disable-model-invocation: true
 allowed-tools: Bash(node:*)
 ---

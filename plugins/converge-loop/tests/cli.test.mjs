@@ -86,7 +86,54 @@ test("default real adapters fail closed without explicit safe local adapter enab
   assert.equal(result.code, 0);
   const parsed = JSON.parse(result.stdout);
   assert.equal(parsed.status, "blocked");
-  assert.match(parsed.summary, /fail-closed/);
+  assert.match(parsed.summary, /run `converge-loop setup`/);
+  assert.doesNotMatch(parsed.summary, /CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS/);
+});
+
+test("setup verifies local cli readiness and enables real adapters without env flag", async () => {
+  const stateRoot = tempRoot("setup");
+  const binDir = path.join(stateRoot, "bin");
+  fs.mkdirSync(binDir, { recursive: true });
+  const codex = path.join(binDir, "codex");
+  const claude = path.join(binDir, "claude");
+  fs.writeFileSync(codex, "#!/bin/sh\nif [ \"$1\" = \"exec\" ]; then echo 'Usage: codex exec --sandbox --cd'; exit 0; fi\necho 'codex';\n");
+  fs.writeFileSync(claude, "#!/bin/sh\necho 'Usage: claude --print --permission-mode --disallowedTools --output-format';\n");
+  fs.chmodSync(codex, 0o755);
+  fs.chmodSync(claude, 0o755);
+  const harness = io(stateRoot);
+  harness.env.PATH = `${binDir}${path.delimiter}${harness.env.PATH || ""}`;
+  delete harness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS;
+  const setupCode = await runCli(["setup", "--json"], harness);
+  assert.equal(setupCode, 0, harness.err.join(""));
+  const setup = JSON.parse(harness.out.join(""));
+  assert.equal(setup.ok, true);
+  assert.equal(setup.enabled, true);
+  assert.equal(setup.checks.codex.ok, true);
+  assert.equal(setup.checks.claude.ok, true);
+  assert.ok(fs.existsSync(setup.config_path));
+
+  const runHarness = io(stateRoot);
+  runHarness.env.PATH = harness.env.PATH;
+  delete runHarness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS;
+  runHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE = "1";
+  const runCode = await runCli(["run", "--topic", "configured local adapters", "--json"], runHarness);
+  assert.equal(runCode, 0, runHarness.err.join(""));
+  const parsed = JSON.parse(runHarness.out.join(""));
+  assert.equal(parsed.status, "agreed");
+  assert.deepEqual(parsed.participants.map((participant) => participant.adapter), ["codex", "claude"]);
+});
+
+test("setup reports unavailable local cli controls without enabling adapters", async () => {
+  const stateRoot = tempRoot("setup-unavailable");
+  const harness = io(stateRoot);
+  harness.env.CONVERGE_LOOP_CODEX_BIN = path.join(stateRoot, "missing-codex");
+  harness.env.CONVERGE_LOOP_CLAUDE_BIN = path.join(stateRoot, "missing-claude");
+  const code = await runCli(["setup", "--json"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const parsed = JSON.parse(harness.out.join(""));
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.enabled, false);
+  assert.match(parsed.next_step, /Install and authenticate/);
 });
 
 test("host aliases select the expected default opposite-agent order", () => {
@@ -196,12 +243,14 @@ test("claude command surface is discoverable as a single command", () => {
   assert.deepEqual(fs.readdirSync(commandDir), ["converge-loop.md"]);
   const command = fs.readFileSync(commandPath, "utf8");
   assert.match(command, /CLAUDE_PLUGIN_ROOT/);
+  assert.match(command, /setup \[--json\]/);
   assert.doesNotMatch(command, /CONVERGE_LOOP_HOST/);
 });
 
 test("help presents host-aware run example before fake adapter smoke paths", async () => {
   const result = await cli(["help"]);
   assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /converge-loop setup/);
   assert.match(result.stdout, /converge-loop run --topic/);
   assert.doesNotMatch(result.stdout, /CONVERGE_LOOP_HOST=akx/);
   assert.doesNotMatch(result.stdout, /fake-sequence,fake-sequence/);
@@ -209,9 +258,14 @@ test("help presents host-aware run example before fake adapter smoke paths", asy
 
 test("codex skill owns codex host identity without exposing old akx setup", () => {
   const skill = fs.readFileSync(path.join(repoRoot, "skills/converge-loop/SKILL.md"), "utf8");
+  const setupSkill = fs.readFileSync(path.join(repoRoot, "skills/converge-loop-setup/SKILL.md"), "utf8");
   assert.match(skill, /CONVERGE_LOOP_HOST=codex converge-loop run/);
+  assert.match(skill, /CONVERGE_LOOP_HOST=codex converge-loop setup/);
   assert.match(skill, /CONVERGE_LOOP_HOST=codex node scripts\/bin\/converge-loop\.mjs run/);
   assert.match(skill, /CLAUDE_PLUGIN_ROOT/);
+  assert.match(skill, /converge-loop setup/);
+  assert.match(setupSkill, /converge-loop\.mjs" setup/);
+  assert.doesNotMatch(setupSkill, /CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS/);
   assert.doesNotMatch(skill, /CONVERGE_LOOP_HOST=akx/);
   assert.doesNotMatch(skill, /CONVERGE_LOOP_HOST=akc/);
 });
