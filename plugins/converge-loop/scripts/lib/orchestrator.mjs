@@ -453,7 +453,8 @@ function isTimeoutError(error) {
 
 // Invoke-time degraded fallback: when the default opposite-agent pairing
 // loses an adapter mid-session, swap that slot to the other local CLI rather
-// than killing the whole session. Explicit --agents selections never swap.
+// than killing the whole session. Explicit selections (--counterpart or
+// --fake-adapters) never swap.
 function maybeSwapParticipant({ participant, options, env }) {
   if (options.agents) return null;
   if (participant.tier === "fallback" || participant.fallback_for) return null;
