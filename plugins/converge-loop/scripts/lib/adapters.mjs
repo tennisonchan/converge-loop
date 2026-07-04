@@ -220,13 +220,15 @@ class FakeAdapter {
   }
 
   async invoke({ participant, turnIndex, options, transcript }) {
-    if (options.turnDelayMs) {
-      await delay(options.turnDelayMs);
-    }
     let scripted = loadFixtureTurn(options.fixture, turnIndex, participant);
+    const turnDelayMs = scripted?.delay_ms ?? options.turnDelayMs;
     if (scripted && Array.isArray(scripted.attempts)) {
       const attempt = Math.min(options.__attempt || 0, scripted.attempts.length - 1);
       scripted = scripted.attempts[attempt];
+    }
+    const attemptDelayMs = scripted?.delay_ms ?? turnDelayMs;
+    if (attemptDelayMs) {
+      await delay(attemptDelayMs);
     }
     if (typeof scripted === "string") return scripted;
     const response = scripted || defaultFakeTurn({ participant, turnIndex, options, transcript });

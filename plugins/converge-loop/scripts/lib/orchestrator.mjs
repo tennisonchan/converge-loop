@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
-import { RESULT_SCHEMA } from "./constants.mjs";
+import { DEFAULT_RUN_OPTIONS, RESULT_SCHEMA } from "./constants.mjs";
 import { buildParticipants, getAdapter, preflightParticipants } from "./adapters.mjs";
 import { hasNewProgress, isConverged, normalizeControl, parseParticipantOutput } from "./control.mjs";
 import { nowIso, sha256 } from "./util.mjs";
@@ -144,10 +144,12 @@ export async function runSession({ store, options, stdout, env, sessionId = null
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const attemptPrompt = attempt === 0 ? prompt : buildRepairPrompt(prompt, nonce, controlMode);
       try {
-        const raw = await adapter.invoke({
+        const raw = await invokeAdapterWithTimeout({
+          adapter,
           participant,
           turnIndex,
-          options: { ...options, __turnIndex: turnIndex, __attempt: attempt },
+          options,
+          attempt,
           transcript,
           prompt: attemptPrompt,
           nonce
@@ -640,4 +642,27 @@ function independentCoverage(participants) {
 
 function dedupe(values) {
   return [...new Set(values.filter(Boolean))];
+}
+
+function invokeAdapterWithTimeout({ adapter, participant, turnIndex, options, attempt, transcript, prompt, nonce }) {
+  const timeoutSeconds = options.turnTimeoutSeconds ?? DEFAULT_RUN_OPTIONS.turnTimeoutSeconds;
+  const timeoutMs = timeoutSeconds * 1000;
+  let timer = null;
+  // Adapter-owned timeouts still handle child-process cleanup; this boundary guarantees session state advances.
+  const invocation = adapter.invoke({
+    participant,
+    turnIndex,
+    options: { ...options, __turnIndex: turnIndex, __attempt: attempt },
+    transcript,
+    prompt,
+    nonce
+  });
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${participant.adapter} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  return Promise.race([invocation, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
