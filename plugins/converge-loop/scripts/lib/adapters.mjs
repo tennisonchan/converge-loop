@@ -15,6 +15,11 @@ export const LOCAL_CLI_REQUIRED_FLAGS = Object.freeze({
 
 export const PARTICIPANT_SCHEMA_PATH = fileURLToPath(new URL("../../schemas/participant-output.schema.json", import.meta.url));
 
+// Single source of truth for the deterministic verification adapters; CLI
+// validation, adapter construction, and tier/provider classification must
+// agree on this set so fake coverage can never masquerade as real deliberation.
+export const FAKE_ADAPTERS = Object.freeze(["fake-sequence", "fake-replay", "fake-tooling"]);
+
 // claude --json-schema silently skips structured output when the schema
 // carries a $schema meta key, so strip it before passing the schema inline.
 function participantSchemaInline() {
@@ -44,7 +49,7 @@ export function buildParticipants(options, env = process.env) {
       adapter,
       provider,
       role: roles[index] || `participant-${index + 1}`,
-      tier: adapter.startsWith("fake-") ? "fake" : "external",
+      tier: FAKE_ADAPTERS.includes(adapter) ? "fake" : "external",
       fallback_for: null
     };
   });
@@ -178,7 +183,7 @@ function firstCapabilityFailure(checked, options) {
 }
 
 export function getAdapter(name, env = process.env) {
-  if (name === "fake-sequence" || name === "fake-replay" || name === "fake-tooling") {
+  if (FAKE_ADAPTERS.includes(name)) {
     return new FakeAdapter(name);
   }
   if (name === "codex") return new LocalCliAdapter("codex", env);
@@ -189,7 +194,7 @@ export function getAdapter(name, env = process.env) {
 export function providerFor(adapter) {
   if (adapter === "codex") return "openai";
   if (adapter === "claude") return "anthropic";
-  if (adapter.startsWith("fake-")) return "local-fake";
+  if (FAKE_ADAPTERS.includes(adapter)) return "local-fake";
   return "unknown";
 }
 

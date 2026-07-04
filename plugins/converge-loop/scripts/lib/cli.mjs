@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DEFAULT_RUN_OPTIONS, RESULT_SCHEMA, RESUMABLE_STATUSES } from "./constants.mjs";
-import { checkLocalCliReadiness, localAdapterConfigPath, readLocalAdapterConfig, resolveHost, writeLocalAdapterConfig } from "./adapters.mjs";
+import { checkLocalCliReadiness, FAKE_ADAPTERS, localAdapterConfigPath, readLocalAdapterConfig, resolveHost, writeLocalAdapterConfig } from "./adapters.mjs";
 import { runSession } from "./orchestrator.mjs";
 import { StateStore } from "./state-store.mjs";
 import {
@@ -230,7 +230,8 @@ export function parseRunArgs(args, io) {
     else if (arg === "--base") options.base = next();
     else if (arg === "--web") options.web = enumValue("--web", next(), ["off", "shared"]);
     else if (arg === "--focus") options.focus = next();
-    else if (arg === "--agents") options.agents = splitList(next());
+    else if (arg === "--counterpart") options.counterpart = enumValue("--counterpart", next(), ["codex", "claude"]);
+    else if (arg === "--fake-adapters") options.fakeAdapters = splitList(next());
     else if (arg === "--roles") options.roles = splitList(next());
     else if (arg === "--output") options.output = enumValue("--output", next(), ["compact", "verbose", "quiet"]);
     else if (arg === "--intervene") options.intervene = true;
@@ -247,8 +248,39 @@ export function parseRunArgs(args, io) {
     else if (arg === "--turn-delay-ms") options.turnDelayMs = positiveInt("--turn-delay-ms", next());
     else throw new Error(`unknown run option: ${arg}`);
   }
+  resolveParticipantSelection(options);
   validateRunOptions(options, io);
   return options;
+}
+
+// Participant selection mirrors review-loop: the host agent is always the
+// primary participant and --counterpart picks the other side, defaulting to
+// the opposite agent. --fake-adapters is per-invocation deterministic
+// verification only — it refuses real adapters, so fake coverage can never
+// masquerade as real deliberation, and a fake selection stays argv-borne so
+// persisted background-job commands reproduce it (a --counterpart pair derives
+// its primary from the host environment at parse time). Either explicit
+// selection disables the implicit degraded fallback swap.
+function resolveParticipantSelection(options) {
+  if (options.counterpart && options.fakeAdapters) {
+    throw new Error("--counterpart cannot be combined with --fake-adapters");
+  }
+  if (options.counterpart) {
+    options.agents = [options.hostAgent, options.counterpart];
+  } else if (options.fakeAdapters) {
+    if (options.fakeAdapters.length !== 2) {
+      throw new Error("--fake-adapters must name exactly two participants");
+    }
+    const unknown = options.fakeAdapters.filter((adapter) => !FAKE_ADAPTERS.includes(adapter));
+    if (unknown.length) {
+      throw new Error(`--fake-adapters only accepts ${FAKE_ADAPTERS.join(", ")}; got: ${unknown.join(", ")}`);
+    }
+    options.agents = options.fakeAdapters;
+  }
+  // options.agents is the single persisted representation; drop the source
+  // fields so session.json cannot carry a second, divergent copy.
+  delete options.counterpart;
+  delete options.fakeAdapters;
 }
 
 function validateRunOptions(options, io) {
@@ -261,11 +293,8 @@ function validateRunOptions(options, io) {
   if (options.web === "shared" && !(options.topic || options.focus || options.context || options.artifact)) {
     throw new Error("--web shared requires a topic, focus, context, or artifact");
   }
-  if (options.agents && options.agents.length < 2) {
-    throw new Error("--agents requires at least two participants");
-  }
-  if (options.roles && options.agents && options.roles.length !== options.agents.length) {
-    throw new Error("--roles and --agents must have the same number of entries when both are supplied");
+  if (options.roles && (options.roles.length === 0 || options.roles.length > 2)) {
+    throw new Error("--roles requires one or two entries (primary, secondary)");
   }
   const hasInput = Boolean(options.topic || options.focus || options.context || options.artifact || options.web === "shared");
   if (!hasInput && options.scope === "working-tree" && !hasWorkingTreeMaterial(io.cwd)) {

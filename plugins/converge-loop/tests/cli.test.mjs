@@ -41,6 +41,13 @@ async function cli(args, stateRoot = tempRoot("state"), cwd = repoRoot) {
   };
 }
 
+// Deterministic participant pairs use the test-restricted --fake-adapters
+// flag; the public run surface only exposes the host primary plus --counterpart.
+// Run-specific: pass run options only, without the "run" subcommand.
+function cliFakes(pair, args, stateRoot, cwd) {
+  return cli(["run", "--fake-adapters", pair, ...args], stateRoot, cwd);
+}
+
 function writeFixture(dir, value) {
   const file = path.join(dir, "fixture.json");
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
@@ -151,10 +158,7 @@ function readTurns(stateRoot, id) {
 
 test("fake sequence run persists normalized session result", async () => {
   const stateRoot = tempRoot("run");
-  const result = await cli([
-    "run",
-    "--agents",
-    "fake-sequence,fake-sequence",
+  const result = await cliFakes("fake-sequence,fake-sequence", [
     "--topic",
     "test plan",
     "--json"
@@ -175,6 +179,94 @@ test("run validation rejects branch scope without base", async () => {
   const result = await cli(["run", "--scope", "branch", "--topic", "x"]);
   assert.equal(result.code, 1);
   assert.match(result.stderr, /--scope branch requires --base/);
+});
+
+test("--agents is no longer a public run option", async () => {
+  const result = await cli(["run", "--agents", "codex,claude", "--topic", "x"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /unknown run option: --agents/);
+});
+
+test("--counterpart accepts only codex or claude", async () => {
+  const result = await cli(["run", "--counterpart", "fake-sequence", "--topic", "x"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /--counterpart must be one of codex, claude/);
+});
+
+test("--counterpart pairs the host primary with the selected agent", async () => {
+  const stateRoot = tempRoot("secondary-pair");
+  const harness = io(stateRoot);
+  harness.env.CONVERGE_LOOP_HOST = "codex";
+  harness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS = "1";
+  harness.env.CONVERGE_LOOP_ASSUME_LOCAL_CLI_PREFLIGHT = "1";
+  harness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE = "1";
+  const code = await runCli(["run", "--counterpart", "codex", "--topic", "same provider", "--json"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const parsed = JSON.parse(harness.out.join(""));
+  assert.equal(parsed.status, "agreed");
+  assert.deepEqual(parsed.participants.map((participant) => participant.adapter), ["codex", "codex"]);
+  assert.equal(parsed.independent_provider_coverage, false);
+  assert.deepEqual(parsed.fallbacks_used, []);
+});
+
+test("--counterpart explicit selection does not fall back when unavailable", async () => {
+  const stateRoot = tempRoot("secondary-no-fallback");
+  const harness = io(stateRoot);
+  harness.env.CONVERGE_LOOP_HOST = "codex";
+  harness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS = "1";
+  harness.env.CONVERGE_LOOP_ASSUME_LOCAL_CLI_PREFLIGHT = "1";
+  harness.env.CONVERGE_LOOP_TEST_UNAVAILABLE_ADAPTERS = "claude";
+  const code = await runCli(["run", "--counterpart", "claude", "--topic", "explicit secondary", "--json"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const parsed = JSON.parse(harness.out.join(""));
+  assert.equal(parsed.status, "blocked");
+  assert.match(parsed.summary, /claude adapter forced unavailable/);
+  assert.deepEqual(parsed.fallbacks_used, []);
+});
+
+test("--counterpart cannot be combined with --fake-adapters", async () => {
+  const result = await cli(["run", "--counterpart", "claude", "--fake-adapters", "fake-sequence,fake-sequence", "--topic", "x"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /--counterpart cannot be combined with --fake-adapters/);
+});
+
+test("--fake-adapters must name exactly two participants", async () => {
+  const result = await cli(["run", "--fake-adapters", "fake-sequence", "--topic", "x"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /exactly two participants/);
+});
+
+test("--fake-adapters refuses real adapters", async () => {
+  const result = await cli(["run", "--fake-adapters", "codex,claude", "--topic", "x"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /only accepts fake-sequence, fake-replay, fake-tooling; got: codex, claude/);
+});
+
+test("--fake-adapters rejects unknown fake adapter names at parse time", async () => {
+  const result = await cli(["run", "--fake-adapters", "fake-seqence,fake-sequence", "--topic", "x"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /got: fake-seqence/);
+});
+
+test("--roles rejects more stances than participants", async () => {
+  const result = await cli(["run", "--topic", "x", "--roles", "a,b,c"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /--roles requires one or two entries/);
+});
+
+test("--roles rejects an empty stance list instead of silently dropping defaults", async () => {
+  const result = await cli(["run", "--topic", "x", "--roles", ""]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /--roles requires one or two entries/);
+});
+
+test("--roles with a single stance keeps the second participant's default role", async () => {
+  const stateRoot = tempRoot("single-role");
+  const result = await cliFakes("fake-sequence,fake-sequence", ["--roles", "proposer", "--topic", "single role", "--json"], stateRoot);
+  assert.equal(result.code, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.status, "agreed");
+  assert.deepEqual(parsed.participants.map((participant) => participant.role), ["proposer", "participant-2"]);
 });
 
 test("default real adapters fail closed without explicit safe local adapter enablement", async () => {
@@ -478,7 +570,7 @@ test("host aliases are recorded as normalized host_agent values", async () => {
   harness.env.CLAUDE_PLUGIN_ROOT = repoRoot;
   const code = await runCli([
     "run",
-    "--agents",
+    "--fake-adapters",
     "fake-sequence,fake-sequence",
     "--topic",
     "host record",
@@ -494,7 +586,7 @@ test("background job records host and cancel-before-init preserves it", async ()
   harness.env.CLAUDE_PLUGIN_ROOT = repoRoot;
   const runCode = await runCli([
     "run",
-    "--agents",
+    "--fake-adapters",
     "fake-sequence,fake-sequence",
     "--topic",
     "cancel before init",
@@ -589,10 +681,7 @@ test("fixture coverage includes terminal statuses", async () => {
   for (const [expected, control] of cases) {
     const stateRoot = tempRoot(expected);
     const fixture = writeFixture(stateRoot, { turns: [{ message: expected, control }] });
-    const result = await cli([
-      "run",
-      "--agents",
-      "fake-replay,fake-replay",
+    const result = await cliFakes("fake-replay,fake-replay", [
       "--topic",
       expected,
       "--fixture",
@@ -639,10 +728,7 @@ test("control parser accepts root-level json control", () => {
 });
 
 test("max turns and read-only violations produce terminal results", async () => {
-  const maxTurns = await cli([
-    "run",
-    "--agents",
-    "fake-sequence,fake-sequence",
+  const maxTurns = await cliFakes("fake-sequence,fake-sequence", [
     "--topic",
     "turn cap",
     "--max-turns",
@@ -651,10 +737,7 @@ test("max turns and read-only violations produce terminal results", async () => 
   ]);
   assert.equal(JSON.parse(maxTurns.stdout).status, "max_turns");
 
-  const blocked = await cli([
-    "run",
-    "--agents",
-    "fake-tooling,fake-tooling",
+  const blocked = await cliFakes("fake-tooling,fake-tooling", [
     "--topic",
     "WRITE_VIOLATION",
     "--json"
@@ -682,10 +765,7 @@ test("stalled adapter turn records adapter failure instead of remaining running"
       }
     ]
   });
-  const result = await cli([
-    "run",
-    "--agents",
-    "fake-sequence,fake-sequence",
+  const result = await cliFakes("fake-sequence,fake-sequence", [
     "--topic",
     "adapter timeout",
     "--fixture",
@@ -713,10 +793,7 @@ test("stalled adapter turn records adapter failure instead of remaining running"
 
 test("result export requires explicit versioned export when destination is tracked-visible", async () => {
   const stateRoot = tempRoot("export");
-  const run = await cli([
-    "run",
-    "--agents",
-    "fake-sequence,fake-sequence",
+  const run = await cliFakes("fake-sequence,fake-sequence", [
     "--topic",
     "export",
     "--json"
@@ -739,10 +816,7 @@ test("resume continues from an allowed terminal state", async () => {
       { message: "resolved", control: { status: "agreed", agreements: ["done"], ready_to_converge: true } }
     ]
   });
-  const run = await cli([
-    "run",
-    "--agents",
-    "fake-replay,fake-replay",
+  const run = await cliFakes("fake-replay,fake-replay", [
     "--topic",
     "resume",
     "--fixture",
@@ -767,10 +841,7 @@ test("agreed on the first participant turn still waits for the second participan
       { message: "confirmed", control: { status: "agreed", agreements: ["confirmed"], ready_to_converge: true } }
     ]
   });
-  const result = await cli([
-    "run",
-    "--agents",
-    "fake-replay,fake-replay",
+  const result = await cliFakes("fake-replay,fake-replay", [
     "--topic",
     "min turn",
     "--fixture",
@@ -787,7 +858,8 @@ test("local cli adapter preflight can be exercised without enabling unsafe execu
   const harness = io(stateRoot);
   harness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS = "1";
   harness.env.CONVERGE_LOOP_ASSUME_LOCAL_CLI_PREFLIGHT = "1";
-  const result = await runCli(["run", "--agents", "codex,claude", "--topic", "preflight", "--web", "shared", "--json"], harness);
+  harness.env.CONVERGE_LOOP_HOST = "codex";
+  const result = await runCli(["run", "--counterpart", "claude", "--topic", "preflight", "--web", "shared", "--json"], harness);
   assert.equal(result, 0);
   const parsed = JSON.parse(harness.out.join(""));
   assert.equal(parsed.status, "blocked");
@@ -817,13 +889,14 @@ test("default opposite-agent preflight can fall back to degraded host participan
   assert.match(transcript, /degraded fallback/i);
 });
 
-test("explicit agents do not use degraded fallback implicitly", async () => {
+test("explicit participant selection does not use degraded fallback implicitly", async () => {
   const stateRoot = tempRoot("explicit-no-fallback");
   const harness = io(stateRoot);
   harness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS = "1";
   harness.env.CONVERGE_LOOP_ASSUME_LOCAL_CLI_PREFLIGHT = "1";
   harness.env.CONVERGE_LOOP_TEST_UNAVAILABLE_ADAPTERS = "claude";
-  const code = await runCli(["run", "--agents", "codex,claude", "--topic", "explicit", "--json"], harness);
+  harness.env.CONVERGE_LOOP_HOST = "codex";
+  const code = await runCli(["run", "--counterpart", "claude", "--topic", "explicit", "--json"], harness);
   assert.equal(code, 0, harness.err.join(""));
   const parsed = JSON.parse(harness.out.join(""));
   assert.equal(parsed.status, "blocked");
@@ -867,10 +940,7 @@ test("status reports a starting job before session files exist", async () => {
 
 test("background run creates a job and terminal status", async () => {
   const stateRoot = tempRoot("background");
-  const run = await cli([
-    "run",
-    "--agents",
-    "fake-sequence,fake-sequence",
+  const run = await cliFakes("fake-sequence,fake-sequence", [
     "--topic",
     "background",
     "--background"
@@ -884,10 +954,7 @@ test("background run creates a job and terminal status", async () => {
 
 test("cancel marks a running background job canceled", async () => {
   const stateRoot = tempRoot("cancel");
-  const run = await cli([
-    "run",
-    "--agents",
-    "fake-sequence,fake-sequence",
+  const run = await cliFakes("fake-sequence,fake-sequence", [
     "--topic",
     "cancel",
     "--turn-delay-ms",
@@ -956,9 +1023,7 @@ test("one participant declaring agreed with core pushbacks does not end the sess
       { message: "agree but blocked", control: { status: "agreed", ready_to_converge: true, pushbacks: ["storage model is wrong"] } }
     ]
   });
-  const result = await cli([
-    "run",
-    "--agents", "fake-replay,fake-replay",
+  const result = await cliFakes("fake-replay,fake-replay", [
     "--topic", "core pushback",
     "--fixture", fixture,
     "--max-turns", "2",
@@ -979,9 +1044,7 @@ test("minor reservations do not block convergence and are disclosed", async () =
       { message: "core agreed", control: { status: "agreed", ready_to_converge: true, minor_reservations: ["naming could be better"] } }
     ]
   });
-  const result = await cli([
-    "run",
-    "--agents", "fake-replay,fake-replay",
+  const result = await cliFakes("fake-replay,fake-replay", [
     "--topic", "minor reservations",
     "--fixture", fixture,
     "--json"
@@ -1005,9 +1068,7 @@ test("repeated identical positions end as clear disagreement instead of running 
       { message: "position B again", control: { status: "continue", pushbacks: ["B"], ready_to_converge: false } }
     ]
   });
-  const result = await cli([
-    "run",
-    "--agents", "fake-replay,fake-replay",
+  const result = await cliFakes("fake-replay,fake-replay", [
     "--topic", "repetition",
     "--fixture", fixture,
     "--json"
@@ -1026,9 +1087,7 @@ test("missing control block triggers a repair retry before counting as no progre
       { message: "agreed", control: { status: "agreed", agreements: ["fine"], ready_to_converge: true } }
     ]
   });
-  const result = await cli([
-    "run",
-    "--agents", "fake-replay,fake-replay",
+  const result = await cliFakes("fake-replay,fake-replay", [
     "--topic", "repair",
     "--fixture", fixture,
     "--json"
@@ -1057,9 +1116,7 @@ test("top-level fixture delay applies to string and structured attempts", async 
     ]
   });
   const started = Date.now();
-  const result = await cli([
-    "run",
-    "--agents", "fake-replay,fake-replay",
+  const result = await cliFakes("fake-replay,fake-replay", [
     "--topic", "attempt delay",
     "--fixture", fixture,
     "--json"
@@ -1085,9 +1142,7 @@ test("resume seeds latest controls and result aggregates from pre-resume turns",
       { message: "confirm", control: { status: "agreed", ready_to_converge: true } }
     ]
   });
-  const first = await cli([
-    "run",
-    "--agents", "fake-replay,fake-replay",
+  const first = await cliFakes("fake-replay,fake-replay", [
     "--topic", "resume seeding",
     "--fixture", fixture,
     "--json"
@@ -1123,9 +1178,7 @@ test("--max-control-retries 0 disables repair retries", async () => {
       { message: "agreed", control: { status: "agreed", ready_to_converge: true } }
     ]
   });
-  const result = await cli([
-    "run",
-    "--agents", "fake-replay,fake-replay",
+  const result = await cliFakes("fake-replay,fake-replay", [
     "--topic", "no retries",
     "--fixture", fixture,
     "--max-control-retries", "0",
@@ -1146,9 +1199,7 @@ test("exhausted control repairs record the raw reply and end without progress", 
       { attempts: ["nothing parseable", "nothing parseable again"] }
     ]
   });
-  const result = await cli([
-    "run",
-    "--agents", "fake-replay,fake-replay",
+  const result = await cliFakes("fake-replay,fake-replay", [
     "--topic", "repair exhausted",
     "--fixture", fixture,
     "--json"
@@ -1186,9 +1237,7 @@ test("invoke-time adapter failure swaps to the opposite adapter with degraded di
 
 test("per-attempt timeout blocks with adapter_failure reason and the session is resumable", async () => {
   const stateRoot = tempRoot("attempt-timeout");
-  const blocked = await cli([
-    "run",
-    "--agents", "fake-sequence,fake-sequence",
+  const blocked = await cliFakes("fake-sequence,fake-sequence", [
     "--topic", "attempt timeout",
     "--turn-delay-ms", "1500",
     "--turn-timeout-seconds", "1",
@@ -1216,9 +1265,7 @@ test("participant recursion sentinel refuses nested run and resume", async () =>
 
 test("interrupted foreground sessions stuck in running state can be resumed", async () => {
   const stateRoot = tempRoot("stuck-running");
-  const run = await cli([
-    "run",
-    "--agents", "fake-sequence,fake-sequence",
+  const run = await cliFakes("fake-sequence,fake-sequence", [
     "--topic", "stuck running",
     "--json"
   ], stateRoot);
@@ -1237,9 +1284,7 @@ test("interrupted foreground sessions stuck in running state can be resumed", as
 
 test("resume is refused while a foreground session is genuinely live", async () => {
   const stateRoot = tempRoot("live-refuse");
-  const run = await cli([
-    "run",
-    "--agents", "fake-sequence,fake-sequence",
+  const run = await cliFakes("fake-sequence,fake-sequence", [
     "--topic", "live refuse",
     "--json"
   ], stateRoot);
@@ -1261,7 +1306,7 @@ test("resume is refused while a foreground session is genuinely live", async () 
   assert.match(resumed.stderr, /cannot be resumed from status running/);
 });
 
-test("explicit --agents never swaps to a fallback on invoke failure", async () => {
+test("explicit participant selection never swaps to a fallback on invoke failure", async () => {
   const stateRoot = tempRoot("explicit-no-swap");
   const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"), { codexExecFail: true });
   const setupHarness = io(stateRoot);
@@ -1273,7 +1318,8 @@ test("explicit --agents never swaps to a fallback on invoke failure", async () =
   runHarness.env.PATH = setupHarness.env.PATH;
   delete runHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
   delete runHarness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS;
-  const runCode = await runCli(["run", "--agents", "codex,claude", "--topic", "explicit no swap", "--scope", "none", "--json"], runHarness);
+  runHarness.env.CONVERGE_LOOP_HOST = "codex";
+  const runCode = await runCli(["run", "--counterpart", "claude", "--topic", "explicit no swap", "--scope", "none", "--json"], runHarness);
   assert.equal(runCode, 0, runHarness.err.join(""));
   const parsed = JSON.parse(runHarness.out.join(""));
   assert.equal(parsed.status, "blocked");
@@ -1321,9 +1367,7 @@ test("cancel signals the whole process group when the leader is gone", async () 
 
 test("status tolerates a torn trailing line in turns.jsonl", async () => {
   const stateRoot = tempRoot("torn");
-  await cli([
-    "run",
-    "--agents", "fake-sequence,fake-sequence",
+  await cliFakes("fake-sequence,fake-sequence", [
     "--topic", "torn jsonl",
     "--json"
   ], stateRoot);
@@ -1342,9 +1386,7 @@ test("resume repairs a torn trailing turn record before appending new turns", as
       { message: "resolved", control: { status: "agreed", agreements: ["done"], ready_to_converge: true } }
     ]
   });
-  const run = await cli([
-    "run",
-    "--agents", "fake-replay,fake-replay",
+  const run = await cliFakes("fake-replay,fake-replay", [
     "--topic", "torn resume",
     "--fixture", fixture,
     "--json"
@@ -1395,9 +1437,7 @@ test("result validation rejects self-contradictory results", async () => {
 });
 
 test("fake adapter results disclose fake coverage", async () => {
-  const result = await cli([
-    "run",
-    "--agents", "fake-sequence,fake-sequence",
+  const result = await cliFakes("fake-sequence,fake-sequence", [
     "--topic", "fake disclosure",
     "--json"
   ]);
