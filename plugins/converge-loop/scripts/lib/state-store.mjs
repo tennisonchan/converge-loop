@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { EVIDENCE_SCHEMA, JOB_SCHEMA, SESSION_SCHEMA, TURN_SCHEMA } from "./constants.mjs";
+import { validateResult } from "./result.mjs";
 import {
   appendFile,
   appendJsonl,
@@ -91,7 +92,7 @@ export class StateStore {
   }
 
   writeResult(sessionId, result) {
-    writeJson(this.sessionFile(sessionId, "result.json"), result);
+    writeJson(this.sessionFile(sessionId, "result.json"), validateResult(result));
   }
 
   loadResult(sessionId) {
@@ -102,10 +103,41 @@ export class StateStore {
     return fs.existsSync(this.sessionFile(sessionId, "result.json"));
   }
 
+  // Drop a torn trailing record left by a crash mid-append so later appends
+  // and reads see a clean file. Returns true when a repair happened.
+  repairTurnsTail(sessionId) {
+    const file = this.sessionFile(sessionId, "turns.jsonl");
+    if (!fs.existsSync(file)) return false;
+    const lines = fs.readFileSync(file, "utf8").split(/\n/).filter(Boolean);
+    if (!lines.length) return false;
+    try {
+      JSON.parse(lines[lines.length - 1]);
+      return false;
+    } catch {
+      const tmp = `${file}.tmp-${process.pid}`;
+      const kept = lines.slice(0, -1);
+      fs.writeFileSync(tmp, kept.length ? `${kept.join("\n")}\n` : "");
+      fs.renameSync(tmp, file);
+      return true;
+    }
+  }
+
   readTurns(sessionId) {
     const file = this.sessionFile(sessionId, "turns.jsonl");
     if (!fs.existsSync(file)) return [];
-    return fs.readFileSync(file, "utf8").trim().split(/\n+/).filter(Boolean).map((line) => JSON.parse(line));
+    // Tolerate a torn trailing line from a crash mid-append; corruption
+    // anywhere else would silently shift turn alternation, so fail loudly.
+    const lines = fs.readFileSync(file, "utf8").split(/\n/).filter(Boolean);
+    const turns = [];
+    for (let index = 0; index < lines.length; index += 1) {
+      try {
+        turns.push(JSON.parse(lines[index]));
+      } catch {
+        if (index === lines.length - 1) break;
+        throw new Error(`corrupt turn record at line ${index + 1} of ${file}`);
+      }
+    }
+    return turns;
   }
 
   listSessions() {

@@ -69,6 +69,7 @@ if (args[0] === "login" && args[1] === "status") {
   process.exit(${codexAuthExit});
 }
 if (args[0] === "exec") {
+  ${overrides.codexExecFail ? 'process.stderr.write("codex stub forced invoke failure token=abc123secretvalue\\n"); process.exit(1);' : ""}
   let input = "";
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", (chunk) => { input += chunk; });
@@ -669,7 +670,7 @@ test("stalled adapter turn records adapter failure instead of remaining running"
   assert.equal(result.code, 0, result.stderr);
   const parsed = JSON.parse(result.stdout);
   assert.equal(parsed.status, "blocked");
-  assert.match(parsed.summary, /^Adapter failure: fake-sequence timed out after 1000ms/);
+  assert.match(parsed.summary, /^Adapter failure: fake-sequence participant turn timed out after 1000ms/);
 
   const sessionId = findSingleSessionId(stateRoot);
   const session = JSON.parse(fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "session.json"), "utf8"));
@@ -680,7 +681,7 @@ test("stalled adapter turn records adapter failure instead of remaining running"
   assert.equal(turns[0].message, "proposer completed");
   assert.equal(turns[0].violation, null);
   assert.equal(turns[1].violation.type, "adapter_failure");
-  assert.match(turns[1].message, /Adapter failed: fake-sequence timed out after 1000ms/);
+  assert.match(turns[1].message, /Adapter failed: fake-sequence participant turn timed out after 1000ms/);
 });
 
 test("result export requires explicit versioned export when destination is tracked-visible", async () => {
@@ -1128,6 +1129,254 @@ test("exhausted control repairs record the raw reply and end without progress", 
   const parsed = JSON.parse(result.stdout);
   assert.equal(parsed.status, "blocked");
   assert.match(parsed.summary, /No progress was detected/);
+});
+
+test("invoke-time adapter failure swaps to the opposite adapter with degraded disclosure", async () => {
+  const stateRoot = tempRoot("invoke-fallback");
+  const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"), { codexExecFail: true });
+  const setupHarness = io(stateRoot);
+  setupHarness.env.PATH = `${binDir}${path.delimiter}${setupHarness.env.PATH || ""}`;
+  delete setupHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
+  const setupCode = await runCli(["setup", "--json"], setupHarness);
+  assert.equal(setupCode, 0, setupHarness.err.join(""));
+  assert.equal(JSON.parse(setupHarness.out.join("")).enabled, true);
+
+  const runHarness = io(stateRoot);
+  runHarness.env.PATH = setupHarness.env.PATH;
+  delete runHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
+  delete runHarness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS;
+  const runCode = await runCli(["run", "--topic", "invoke fallback", "--scope", "none", "--json"], runHarness);
+  assert.equal(runCode, 0, runHarness.err.join(""));
+  const parsed = JSON.parse(runHarness.out.join(""));
+  assert.equal(parsed.status, "agreed");
+  assert.equal(parsed.participants[0].adapter, "claude");
+  assert.equal(parsed.participants[0].tier, "fallback");
+  assert.equal(parsed.participants[0].fallback_for, "codex");
+  assert.equal(parsed.independent_provider_coverage, false);
+  assert.match(parsed.summary, /degraded fallback/i);
+  assert.equal(parsed.fake_coverage, false);
+});
+
+test("per-attempt timeout blocks with adapter_failure reason and the session is resumable", async () => {
+  const stateRoot = tempRoot("attempt-timeout");
+  const blocked = await cli([
+    "run",
+    "--agents", "fake-sequence,fake-sequence",
+    "--topic", "attempt timeout",
+    "--turn-delay-ms", "1500",
+    "--turn-timeout-seconds", "1",
+    "--json"
+  ], stateRoot);
+  const parsed = JSON.parse(blocked.stdout);
+  assert.equal(parsed.status, "blocked");
+  assert.equal(parsed.blocked_reason, "adapter_failure");
+  assert.match(parsed.summary, /timed out/);
+  const sessionId = findSingleSessionId(stateRoot);
+  const resumed = await cli(["resume", sessionId, "--turn-timeout-seconds", "10", "--json"], stateRoot);
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.equal(readResult(stateRoot, sessionId).status, "agreed");
+});
+
+test("participant recursion sentinel refuses nested run and resume", async () => {
+  for (const args of [["run", "--topic", "nested"], ["resume", "whatever"]]) {
+    const harness = io(tempRoot("sentinel"));
+    harness.env.CONVERGE_LOOP_PARTICIPANT = "1";
+    const code = await runCli(args, harness);
+    assert.equal(code, 1);
+    assert.match(harness.err.join(""), /cannot be invoked from inside a converge-loop participant turn/);
+  }
+});
+
+test("interrupted foreground sessions stuck in running state can be resumed", async () => {
+  const stateRoot = tempRoot("stuck-running");
+  const run = await cli([
+    "run",
+    "--agents", "fake-sequence,fake-sequence",
+    "--topic", "stuck running",
+    "--json"
+  ], stateRoot);
+  assert.equal(JSON.parse(run.stdout).status, "agreed");
+  const sessionId = findSingleSessionId(stateRoot);
+  const sessionPath = path.join(stateRoot, "sessions", sessionId, "session.json");
+  const session = JSON.parse(fs.readFileSync(sessionPath, "utf8"));
+  session.state = "running";
+  delete session.completed_at;
+  fs.writeFileSync(sessionPath, JSON.stringify(session, null, 2));
+  fs.rmSync(path.join(stateRoot, "sessions", sessionId, "result.json"));
+  const resumed = await cli(["resume", sessionId, "--json"], stateRoot);
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.equal(readResult(stateRoot, sessionId).status, "agreed");
+});
+
+test("resume is refused while a foreground session is genuinely live", async () => {
+  const stateRoot = tempRoot("live-refuse");
+  const run = await cli([
+    "run",
+    "--agents", "fake-sequence,fake-sequence",
+    "--topic", "live refuse",
+    "--json"
+  ], stateRoot);
+  assert.equal(run.code, 0, run.stderr);
+  const sessionId = findSingleSessionId(stateRoot);
+  const sessionPath = path.join(stateRoot, "sessions", sessionId, "session.json");
+  const session = JSON.parse(fs.readFileSync(sessionPath, "utf8"));
+  session.state = "running";
+  fs.writeFileSync(sessionPath, JSON.stringify(session, null, 2));
+  fs.rmSync(path.join(stateRoot, "sessions", sessionId, "result.json"));
+  const jobPath = path.join(stateRoot, "jobs", `${sessionId}.json`);
+  const job = JSON.parse(fs.readFileSync(jobPath, "utf8"));
+  job.status = "running";
+  job.pid = process.pid;
+  job.last_heartbeat_at = new Date().toISOString();
+  fs.writeFileSync(jobPath, JSON.stringify(job, null, 2));
+  const resumed = await cli(["resume", sessionId, "--json"], stateRoot);
+  assert.equal(resumed.code, 1);
+  assert.match(resumed.stderr, /cannot be resumed from status running/);
+});
+
+test("explicit --agents never swaps to a fallback on invoke failure", async () => {
+  const stateRoot = tempRoot("explicit-no-swap");
+  const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"), { codexExecFail: true });
+  const setupHarness = io(stateRoot);
+  setupHarness.env.PATH = `${binDir}${path.delimiter}${setupHarness.env.PATH || ""}`;
+  delete setupHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
+  await runCli(["setup", "--json"], setupHarness);
+
+  const runHarness = io(stateRoot);
+  runHarness.env.PATH = setupHarness.env.PATH;
+  delete runHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
+  delete runHarness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS;
+  const runCode = await runCli(["run", "--agents", "codex,claude", "--topic", "explicit no swap", "--scope", "none", "--json"], runHarness);
+  assert.equal(runCode, 0, runHarness.err.join(""));
+  const parsed = JSON.parse(runHarness.out.join(""));
+  assert.equal(parsed.status, "blocked");
+  assert.equal(parsed.blocked_reason, "adapter_failure");
+  assert.equal(parsed.participants[0].adapter, "codex");
+  assert.deepEqual(parsed.fallbacks_used, []);
+});
+
+test("cancel signals the whole process group when the leader is gone", async () => {
+  const { spawn } = await import("node:child_process");
+  const stateRoot = tempRoot("cancel-tree");
+  // Leader spawns a 60s grandchild in its group, then exits: group-first
+  // probing must still see the session as alive and cancel must kill the group.
+  const leader = spawn(process.execPath, ["-e",
+    "require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 60000)'], { stdio: 'ignore' }).unref();"
+  ], { detached: true, stdio: "ignore" });
+  const leaderPid = leader.pid;
+  await new Promise((resolve) => leader.on("exit", resolve));
+  leader.unref();
+  fs.mkdirSync(path.join(stateRoot, "jobs"), { recursive: true });
+  fs.writeFileSync(path.join(stateRoot, "jobs", "treecancel.json"), JSON.stringify({
+    schema_version: "converge-loop.job.v1",
+    id: "treecancel",
+    pid: leaderPid,
+    command: [],
+    cwd: repoRoot,
+    created_at: new Date().toISOString(),
+    last_heartbeat_at: new Date().toISOString(),
+    status: "running",
+    session_path: path.join(stateRoot, "sessions", "treecancel"),
+    turn_timeout_seconds: 180
+  }));
+  const cancel = await cli(["cancel", "treecancel"], stateRoot);
+  assert.equal(cancel.code, 0, cancel.stderr);
+  assert.match(cancel.stdout, /canceling/);
+  await waitFor(() => {
+    try {
+      process.kill(-leaderPid, 0);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+});
+
+test("status tolerates a torn trailing line in turns.jsonl", async () => {
+  const stateRoot = tempRoot("torn");
+  await cli([
+    "run",
+    "--agents", "fake-sequence,fake-sequence",
+    "--topic", "torn jsonl",
+    "--json"
+  ], stateRoot);
+  const sessionId = findSingleSessionId(stateRoot);
+  fs.appendFileSync(path.join(stateRoot, "sessions", sessionId, "turns.jsonl"), '{"schema_version":"converge-loop.turn.v1","turn_ind');
+  const status = await cli(["status", sessionId], stateRoot);
+  assert.equal(status.code, 0, status.stderr);
+  assert.match(status.stdout, /agreed/);
+});
+
+test("resume repairs a torn trailing turn record before appending new turns", async () => {
+  const stateRoot = tempRoot("torn-resume");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      { message: "need logs", control: { status: "needs_evidence", evidence_requests: ["logs"] } },
+      { message: "resolved", control: { status: "agreed", agreements: ["done"], ready_to_converge: true } }
+    ]
+  });
+  const run = await cli([
+    "run",
+    "--agents", "fake-replay,fake-replay",
+    "--topic", "torn resume",
+    "--fixture", fixture,
+    "--json"
+  ], stateRoot);
+  assert.equal(JSON.parse(run.stdout).status, "needs_evidence");
+  const sessionId = findSingleSessionId(stateRoot);
+  const turnsPath = path.join(stateRoot, "sessions", sessionId, "turns.jsonl");
+  fs.appendFileSync(turnsPath, '{"schema_version":"converge-loop.turn.v1","turn_ind');
+  const resumed = await cli(["resume", sessionId, "--fixture", fixture, "--json"], stateRoot);
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.equal(readResult(stateRoot, sessionId).status, "agreed");
+  const lines = fs.readFileSync(turnsPath, "utf8").split(/\n/).filter(Boolean);
+  for (const line of lines) JSON.parse(line);
+  assert.equal(lines.length, 3);
+});
+
+test("redact strips common secret shapes from error text", async () => {
+  const { redact } = await import("../scripts/lib/util.mjs");
+  const input = "auth sk-abcdefghijklmnopqrstuv failed; token=abc123secret; key ghp_0123456789abcdef01 AKIAABCDEFGHIJKLMNOP";
+  const out = redact(input);
+  assert.doesNotMatch(out, /sk-abcdefghijklmnopqrstuv/);
+  assert.doesNotMatch(out, /abc123secret/);
+  assert.doesNotMatch(out, /ghp_0123456789abcdef01/);
+  assert.doesNotMatch(out, /AKIAABCDEFGHIJKLMNOP/);
+  assert.match(out, /sk-REDACTED/);
+});
+
+test("result validation rejects self-contradictory results", async () => {
+  const { validateResult } = await import("../scripts/lib/result.mjs");
+  const base = {
+    schema_version: "converge-loop.result.v1",
+    status: "agreed",
+    summary: "ok",
+    participants: [],
+    fallbacks_used: [],
+    agreements: [],
+    pushbacks_resolved: [],
+    remaining_disagreements: [],
+    minor_reservations: [],
+    improvements: [],
+    operator_intervention_points: [],
+    recommended_next_actions: []
+  };
+  assert.equal(validateResult(base), base);
+  assert.throws(() => validateResult({ ...base, remaining_disagreements: ["core"] }), /agreed result must not carry/);
+  assert.throws(() => validateResult({ ...base, status: "bogus" }), /status must be one of/);
+  assert.throws(() => validateResult({ ...base, blocked_reason: "adapter_failure" }), /only valid on blocked/);
+});
+
+test("fake adapter results disclose fake coverage", async () => {
+  const result = await cli([
+    "run",
+    "--agents", "fake-sequence,fake-sequence",
+    "--topic", "fake disclosure",
+    "--json"
+  ]);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.fake_coverage, true);
+  assert.match(parsed.summary, /Fake-adapter coverage: deterministic test participants/);
 });
 
 function findSingleSessionId(stateRoot) {

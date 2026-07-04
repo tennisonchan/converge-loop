@@ -15,6 +15,7 @@ import {
   nowIso,
   pathInside,
   processExists,
+  signalProcessTree,
   resolveReadablePath,
   runGit
 } from "./util.mjs";
@@ -41,6 +42,7 @@ export async function runCli(argv, io) {
 
 async function runSetup(args, io) {
   const options = parseSetupArgs(args);
+  if (options.smoke) assertNotParticipant(io.env);
   const hostAgent = resolveHost(io.env);
   const warnings = setupWarnings(io.env);
   if (options.disable) {
@@ -272,28 +274,57 @@ function validateRunOptions(options, io) {
 }
 
 async function runRun(args, io) {
+  assertNotParticipant(io.env);
   const options = parseRunArgs(args, io);
   const store = StateStore.fromEnv(io.env);
   if (options.background && !options.backgroundChild) {
     return startBackgroundRun(args, options, io, store);
   }
+  // Foreground runs record a pid-bearing job too, so resume can tell a live
+  // session from a crashed one instead of racing a running process.
+  if (!options.backgroundChild) {
+    options.sessionId = options.sessionId || createSessionId();
+    writeForegroundJob(store, options.sessionId, options, io, "foreground");
+  }
   const controller = new AbortController();
-  const abortOnSigterm = () => controller.abort();
-  process.once("SIGTERM", abortOnSigterm);
+  const abortOnSignal = () => controller.abort();
+  process.once("SIGTERM", abortOnSignal);
+  process.once("SIGINT", abortOnSignal);
   let result;
   try {
     result = await runSession({ store, options, stdout: io.stdout, env: io.env, sessionId: options.sessionId, signal: controller.signal });
   } finally {
-    process.removeListener("SIGTERM", abortOnSigterm);
+    process.removeListener("SIGTERM", abortOnSignal);
+    process.removeListener("SIGINT", abortOnSignal);
   }
-  if (options.backgroundChild && options.sessionId) {
-    const job = store.loadJob(options.sessionId);
-    if (job) {
-      const status = result.status === "canceled" ? "canceled" : "completed";
-      store.writeJob(options.sessionId, { ...job, status, last_heartbeat_at: nowIso() });
-    }
-  }
+  finalizeJob(store, options.sessionId, result);
   return 0;
+}
+
+function writeForegroundJob(store, sessionId, options, io, mode) {
+  const existing = store.loadJob(sessionId);
+  store.writeJob(sessionId, {
+    id: sessionId,
+    command: null,
+    created_at: nowIso(),
+    ...existing,
+    pid: process.pid,
+    cwd: io.cwd,
+    mode,
+    status: "running",
+    last_heartbeat_at: nowIso(),
+    session_path: store.sessionPath(sessionId),
+    turn_timeout_seconds: options.turnTimeoutSeconds,
+    host_agent: options.hostAgent
+  });
+}
+
+function finalizeJob(store, sessionId, result) {
+  if (!sessionId) return;
+  const job = store.loadJob(sessionId);
+  if (!job) return;
+  const status = result?.status === "canceled" ? "canceled" : "completed";
+  store.writeJob(sessionId, { ...job, status, last_heartbeat_at: nowIso() });
 }
 
 function startBackgroundRun(originalArgs, options, io, store) {
@@ -379,7 +410,7 @@ function runCancel(args, io) {
   const job = store.loadJob(sessionId);
   if (!job) throw new Error(`no background job found for ${sessionId}`);
   if (processExists(job.pid)) {
-    process.kill(job.pid, "SIGTERM");
+    signalProcessTree(job.pid, "SIGTERM");
     ensureCanceledResult({ store, sessionId, job, env: io.env });
     store.writeJob(sessionId, { ...job, status: "canceling", last_heartbeat_at: nowIso() });
     io.stdout.write(`${sessionId} canceling\n`);
@@ -392,6 +423,7 @@ function runCancel(args, io) {
 }
 
 async function runResume(args, io) {
+  assertNotParticipant(io.env);
   if (!args[0]) throw new Error("resume requires <session-id>");
   const sessionId = args[0];
   const store = StateStore.fromEnv(io.env);
@@ -409,11 +441,19 @@ async function runResume(args, io) {
   const job = withDerivedJobStatus(store.loadJob(sessionId));
   const stale = job?.derived_status === "stale";
   const status = result?.status || session.state;
-  if (!stale && !RESUMABLE_STATUSES.has(status)) {
+  // Recovery paths: an interrupted foreground run leaves state "running" with
+  // no result and no live process; a dual adapter failure leaves a blocked
+  // result that is safe to retry once adapters are healthy again.
+  const jobLive = job && ["starting", "running", "canceling"].includes(job.status) && processExists(job.pid);
+  const stuckRunning = status === "running" && !result && !jobLive;
+  const adapterFailureBlocked = status === "blocked" && result?.blocked_reason === "adapter_failure";
+  if (!stale && !stuckRunning && !adapterFailureBlocked && !RESUMABLE_STATUSES.has(status)) {
     throw new Error(`session ${sessionId} cannot be resumed from status ${status}`);
   }
   const options = { ...session.options, ...parseResumeOverrides(args.slice(1), io), sessionId };
-  await runSession({ store, options, stdout: io.stdout, env: io.env, sessionId, resume: true });
+  writeForegroundJob(store, sessionId, options, io, "resume");
+  const resumedResult = await runSession({ store, options, stdout: io.stdout, env: io.env, sessionId, resume: true });
+  finalizeJob(store, sessionId, resumedResult);
   return 0;
 }
 
@@ -531,6 +571,7 @@ function ensureCanceledResult({ store, sessionId, job, env = process.env }) {
     minor_reservations: [],
     improvements: [],
     operator_intervention_points: [],
+    fake_coverage: (session.participants || []).some((participant) => participant.tier === "fake"),
     evidence_summary: { observed: [], self_reported: [], residual_asymmetry_risk: "low" },
     recommended_next_actions: [],
     transcript_path: "transcript.md",
@@ -538,6 +579,12 @@ function ensureCanceledResult({ store, sessionId, job, env = process.env }) {
   };
   store.writeConclusion(sessionId, result.summary);
   store.writeResult(sessionId, result);
+}
+
+function assertNotParticipant(env) {
+  if (env.CONVERGE_LOOP_PARTICIPANT === "1") {
+    throw new Error("converge-loop cannot be invoked from inside a converge-loop participant turn");
+  }
 }
 
 function enumValue(name, value, allowed) {
