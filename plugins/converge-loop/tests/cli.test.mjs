@@ -1021,6 +1021,7 @@ test("turn prompt carries safety preamble, materials, transcript, and convergenc
     latestControls: new Map([["p1", { status: "continue", ready_to_converge: true }]])
   });
   assert.match(prompt, /read-only deliberation/i);
+  assert.match(prompt, /Focus: converge/);
   assert.match(prompt, /Do not perform host-agent task management/);
   assert.match(prompt, /PLAN BODY CONTENT/);
   assert.match(prompt, /proposal detail/);
@@ -1438,6 +1439,35 @@ test("resume supplies requested evidence via context override and discloses it",
   assert.match(transcript, /New context supplied on resume: .*usage-data\.md/);
 });
 
+test("resume artifact override is disclosed while carried-over context is not", async () => {
+  const stateRoot = tempRoot("resume-artifact");
+  const originalContext = path.join(stateRoot, "original-context.md");
+  fs.writeFileSync(originalContext, "ORIGINAL CONTEXT");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      { message: "need the spec", control: { status: "needs_evidence", evidence_requests: ["spec"], ready_to_converge: true } },
+      { message: "spec reviewed", control: { status: "agreed", agreements: ["spec settles it"], ready_to_converge: true } },
+      { message: "confirmed", control: { status: "agreed", ready_to_converge: true } }
+    ]
+  });
+  const run = await cliFakes("fake-replay,fake-replay", [
+    "--topic", "artifact resume",
+    "--context", originalContext,
+    "--fixture", fixture,
+    "--json"
+  ], stateRoot);
+  assert.equal(JSON.parse(run.stdout).status, "needs_evidence");
+  const sessionId = findSingleSessionId(stateRoot);
+  const specPath = path.join(stateRoot, "spec.md");
+  fs.writeFileSync(specPath, "REQUESTED SPEC");
+  const resumed = await cli(["resume", sessionId, "--artifact", specPath, "--fixture", fixture, "--json"], stateRoot);
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.equal(readResult(stateRoot, sessionId).status, "agreed");
+  const transcript = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "transcript.md"), "utf8");
+  assert.match(transcript, /New artifact supplied on resume: .*spec\.md/);
+  assert.doesNotMatch(transcript, /context supplied on resume/, "carried-over context must not be re-disclosed");
+});
+
 test("resume repairs a torn trailing turn record before appending new turns", async () => {
   const stateRoot = tempRoot("torn-resume");
   const fixture = writeFixture(stateRoot, {
@@ -1461,6 +1491,8 @@ test("resume repairs a torn trailing turn record before appending new turns", as
   const lines = fs.readFileSync(turnsPath, "utf8").split(/\n/).filter(Boolean);
   for (const line of lines) JSON.parse(line);
   assert.equal(lines.length, 3);
+  const transcript = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "transcript.md"), "utf8");
+  assert.doesNotMatch(transcript, /supplied on resume/, "plain resume must not fabricate evidence disclosures");
 });
 
 test("redact strips common secret shapes from error text", async () => {

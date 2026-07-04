@@ -19,7 +19,7 @@ const PARTICIPANT_TERMINAL_STATUSES = new Set([
   "blocked"
 ]);
 
-export async function runSession({ store, options, stdout, env, sessionId = null, resume = false, signal = null }) {
+export async function runSession({ store, options, stdout, env, sessionId = null, resume = false, resumeOverrides = null, signal = null }) {
   let participants = resume
     ? store.loadSession(sessionId).participants
     : buildParticipants(options, env);
@@ -34,17 +34,18 @@ export async function runSession({ store, options, stdout, env, sessionId = null
     const resumedFrom = session.state;
     const previousOptions = session.options || {};
     const suppliedMaterials = [];
-    // Disclose whatever the operator supplied, even when the path matches the
-    // prior options: answering needs_evidence by updating the same file is a
-    // supported pattern, and focus steers all remaining turns.
+    // Disclose only what the operator explicitly supplied on this resume;
+    // carried-over session options are not new material. Re-supplying the
+    // same path counts (answering needs_evidence by updating the file).
+    const explicit = resumeOverrides || {};
     for (const key of ["context", "artifact"]) {
-      if (options[key]) {
-        const label = options[key] === previousOptions[key] ? "Refreshed" : "New";
-        suppliedMaterials.push(`- ${label} ${key} supplied on resume: ${options[key]}`);
+      if (explicit[key]) {
+        const label = explicit[key] === previousOptions[key] ? "Refreshed" : "New";
+        suppliedMaterials.push(`- ${label} ${key} supplied on resume: ${explicit[key]}`);
       }
     }
-    if (options.focus && options.focus !== previousOptions.focus) {
-      suppliedMaterials.push(`- New focus supplied on resume: ${options.focus}`);
+    if (explicit.focus && explicit.focus !== previousOptions.focus) {
+      suppliedMaterials.push(`- New focus supplied on resume: ${explicit.focus}`);
     }
     session.state = "running";
     session.options = { ...previousOptions, ...options, resumed_from: resumedFrom };

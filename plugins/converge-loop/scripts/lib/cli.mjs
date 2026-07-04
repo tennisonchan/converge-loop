@@ -479,9 +479,10 @@ async function runResume(args, io) {
   if (!stale && !stuckRunning && !adapterFailureBlocked && !RESUMABLE_STATUSES.has(status)) {
     throw new Error(`session ${sessionId} cannot be resumed from status ${status}`);
   }
-  const options = { ...session.options, ...parseResumeOverrides(args.slice(1), io), sessionId };
+  const overrides = parseResumeOverrides(args.slice(1), io);
+  const options = { ...session.options, ...overrides, sessionId };
   writeForegroundJob(store, sessionId, options, io, "resume");
-  const resumedResult = await runSession({ store, options, stdout: io.stdout, env: io.env, sessionId, resume: true });
+  const resumedResult = await runSession({ store, options, stdout: io.stdout, env: io.env, sessionId, resume: true, resumeOverrides: overrides });
   finalizeJob(store, sessionId, resumedResult);
   return 0;
 }
