@@ -528,6 +528,7 @@ function ensureCanceledResult({ store, sessionId, job, env = process.env }) {
     agreements: [],
     pushbacks_resolved: [],
     remaining_disagreements: [],
+    minor_reservations: [],
     improvements: [],
     operator_intervention_points: [],
     evidence_summary: { observed: [], self_reported: [], residual_asymmetry_risk: "low" },

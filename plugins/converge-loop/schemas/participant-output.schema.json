@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "converge-loop participant output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["message", "control"],
+  "properties": {
+    "message": {
+      "type": "string",
+      "description": "Free-form discussion prose for the transcript."
+    },
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "ready_to_converge"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["continue", "agreed", "needs_evidence", "operator_intervention", "blocked"]
+        },
+        "confidence": {
+          "type": "string",
+          "enum": ["low", "medium", "high"]
+        },
+        "agreements": { "type": "array", "items": { "type": "string" } },
+        "pushbacks": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Core, big-picture blockers that must change the conclusion. These block convergence."
+        },
+        "minor_reservations": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Smaller disagreements the participant can live with. Disclosed in the result but do not block convergence."
+        },
+        "improvements": { "type": "array", "items": { "type": "string" } },
+        "open_questions": { "type": "array", "items": { "type": "string" } },
+        "evidence_used": { "type": "array", "items": { "type": "string" } },
+        "evidence_requests": { "type": "array", "items": { "type": "string" } },
+        "concessions": { "type": "array", "items": { "type": "string" } },
+        "ready_to_converge": { "type": "boolean" },
+        "operator_intervention_points": { "type": "array", "items": { "type": "string" } },
+        "next_prompt_suggestion": { "type": "string" }
+      }
+    }
+  }
+}
