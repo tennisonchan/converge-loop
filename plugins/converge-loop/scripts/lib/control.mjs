@@ -153,6 +153,10 @@ const PROGRESS_LIST_KEYS = [
   "operator_intervention_points"
 ];
 
+// Withdrawing one of these without adding anything is still movement
+// toward (or away from) convergence.
+const DEESCALATION_KEYS = ["pushbacks", "evidence_requests", "operator_intervention_points"];
+
 // A turn makes progress only relative to the same participant's previous
 // control: restating the same positions verbatim is not movement.
 export function hasNewProgress(control, previousControl = null) {
@@ -161,9 +165,13 @@ export function hasNewProgress(control, previousControl = null) {
   const previous = normalizeControl(previousControl);
   if (c.status !== previous.status) return true;
   if (c.ready_to_converge !== previous.ready_to_converge) return true;
-  return PROGRESS_LIST_KEYS.some((key) => {
+  if (PROGRESS_LIST_KEYS.some((key) => {
     const seen = new Set(previous[key]);
     return c[key].some((item) => !seen.has(item));
+  })) return true;
+  return DEESCALATION_KEYS.some((key) => {
+    const kept = new Set(c[key]);
+    return previous[key].some((item) => !kept.has(item));
   });
 }
 

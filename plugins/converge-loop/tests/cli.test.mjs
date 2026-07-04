@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildParticipants } from "../scripts/lib/adapters.mjs";
 import { runCli } from "../scripts/lib/cli.mjs";
-import { parseParticipantOutput } from "../scripts/lib/control.mjs";
+import { hasNewProgress, parseParticipantOutput } from "../scripts/lib/control.mjs";
 import { buildTurnPrompt, loadMaterials } from "../scripts/lib/orchestrator.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -958,6 +958,69 @@ test("missing control block triggers a repair retry before counting as no progre
     .trim().split(/\n+/).map((line) => JSON.parse(line));
   assert.equal(turns[0].message, "repaired");
   assert.deepEqual(turns[0].control.improvements, ["x"]);
+});
+
+test("resume seeds latest controls and result aggregates from pre-resume turns", async () => {
+  const stateRoot = tempRoot("resume-seed");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      { message: "opening", control: { status: "needs_evidence", agreements: ["A0"], pushbacks: ["P0"], evidence_requests: ["logs"] } },
+      { message: "evidence in hand", control: { status: "continue", concessions: ["logs reviewed"], ready_to_converge: true } },
+      { message: "withdraw pushback", control: { status: "agreed", agreements: ["A2"], ready_to_converge: true } },
+      { message: "confirm", control: { status: "agreed", ready_to_converge: true } }
+    ]
+  });
+  const first = await cli([
+    "run",
+    "--agents", "fake-replay,fake-replay",
+    "--topic", "resume seeding",
+    "--fixture", fixture,
+    "--json"
+  ], stateRoot);
+  assert.equal(JSON.parse(first.stdout).status, "needs_evidence");
+  const sessionId = findSingleSessionId(stateRoot);
+  const resumed = await cli(["resume", sessionId, "--fixture", fixture, "--json"], stateRoot);
+  assert.equal(resumed.code, 0, resumed.stderr);
+  const result = readResult(stateRoot, sessionId);
+  assert.equal(result.status, "agreed");
+  assert.ok(result.agreements.includes("A0"), "pre-resume agreements survive resume");
+  assert.ok(result.agreements.includes("A2"));
+  assert.deepEqual(result.pushbacks_resolved, ["P0"]);
+  assert.deepEqual(result.remaining_disagreements, []);
+});
+
+test("withdrawing a pushback without adding items still counts as progress", () => {
+  assert.equal(hasNewProgress(
+    { status: "continue", pushbacks: [], ready_to_converge: false },
+    { status: "continue", pushbacks: ["A"], ready_to_converge: false }
+  ), true);
+  assert.equal(hasNewProgress(
+    { status: "continue", pushbacks: ["A"], ready_to_converge: false },
+    { status: "continue", pushbacks: ["A"], ready_to_converge: false }
+  ), false);
+});
+
+test("--max-control-retries 0 disables repair retries", async () => {
+  const stateRoot = tempRoot("no-retries");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      { attempts: ["first attempt has no control", { message: "would repair", control: { status: "continue", improvements: ["x"] } }] },
+      { message: "agreed", control: { status: "agreed", ready_to_converge: true } }
+    ]
+  });
+  const result = await cli([
+    "run",
+    "--agents", "fake-replay,fake-replay",
+    "--topic", "no retries",
+    "--fixture", fixture,
+    "--max-control-retries", "0",
+    "--json"
+  ], stateRoot);
+  assert.equal(result.code, 0, result.stderr);
+  const sessionId = findSingleSessionId(stateRoot);
+  const turns = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "turns.jsonl"), "utf8")
+    .trim().split(/\n+/).map((line) => JSON.parse(line));
+  assert.equal(turns[0].message, "first attempt has no control");
 });
 
 test("exhausted control repairs record the raw reply and end without progress", async () => {

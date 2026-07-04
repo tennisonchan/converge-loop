@@ -46,8 +46,9 @@ export async function runSession({ store, options, stdout, env, sessionId = null
   }
   writeFallbackDisclosure({ store, session, participants, active: preflight.ok });
 
+  const priorTurns = store.readTurns(session.id);
   const latestControls = new Map();
-  for (const priorTurn of store.readTurns(session.id)) {
+  for (const priorTurn of priorTurns) {
     latestControls.set(priorTurn.participant_id, normalizeControl(priorTurn.control));
   }
 
@@ -71,13 +72,22 @@ export async function runSession({ store, options, stdout, env, sessionId = null
 
   const adapters = new Map(preflight.checked.map((entry) => [entry.participant.id, entry.adapter]));
   const materials = loadMaterials(options);
-  const startTurn = store.readTurns(session.id).length;
+  const startTurn = priorTurns.length;
   const deadline = Date.now() + options.maxMinutes * 60_000;
   const allEvidence = [];
   const agreements = [];
   const improvements = [];
   const pushbacksRaised = [];
   const opPoints = [];
+  // Resumed sessions must not lose pre-resume aggregates in the final result.
+  for (const priorTurn of priorTurns) {
+    const priorControl = normalizeControl(priorTurn.control);
+    agreements.push(...priorControl.agreements);
+    improvements.push(...priorControl.improvements);
+    pushbacksRaised.push(...priorControl.pushbacks);
+    opPoints.push(...priorControl.operator_intervention_points);
+    if (Array.isArray(priorTurn.evidence)) allEvidence.push(...priorTurn.evidence);
+  }
   let noProgressCount = 0;
   let result = null;
 
