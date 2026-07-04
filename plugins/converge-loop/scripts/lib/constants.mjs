@@ -27,10 +27,20 @@ export const DEFAULT_RUN_OPTIONS = Object.freeze({
   web: "off",
   output: "compact",
   maxTurns: 8,
-  maxMinutes: 15,
-  turnTimeoutSeconds: 180,
+  maxMinutes: 30,
+  // Absolute per-turn cap. Deliberation turns on large models routinely run
+  // past 3 minutes of pure generation, so this is a hang bound rather than an
+  // expected turn length; turnInactivitySeconds catches hung adapters fast.
+  turnTimeoutSeconds: 420,
+  // Kill a local CLI turn that streams no output at all for this long; 0
+  // disables. Generous because a legitimate read-only tool call (a slow grep
+  // or search) emits nothing until it returns; the window doubles alongside
+  // the absolute cap on the extended timeout retry.
+  turnInactivitySeconds: 120,
   maxToolCallsPerTurn: 20,
   maxControlRetries: 1,
+  claudeModel: null,
+  codexModel: null,
   agents: null,
   roles: null,
   background: false,

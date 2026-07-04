@@ -55,7 +55,8 @@ async function runSetup(args, io) {
       read_only_controls: {
         codex: "sandbox-read-only",
         claude: "tool-denylist-plan-mode"
-      }
+      },
+      ...preservedAdapterSettings(readLocalAdapterConfig(io.env))
     };
     writeLocalAdapterConfig(io.env, payload);
     const result = {
@@ -123,13 +124,21 @@ async function runSetup(args, io) {
       host_agent: hostAgent,
       checks: readiness.checks,
       read_only_controls: readiness.read_only_controls,
-      smoke
+      smoke,
+      ...preservedAdapterSettings(currentConfig)
     };
     writeLocalAdapterConfig(io.env, payload);
     result.actions = [{ action: "write-config", status: enabled ? "enabled" : "disabled" }];
   }
   writeSetupResult(result, options, io);
   return 0;
+}
+
+// Setup rewrites local-adapters.json wholesale; the operator-maintained
+// `adapters` block (per-adapter model overrides) must survive reruns.
+function preservedAdapterSettings(config) {
+  const adapters = config?.adapters;
+  return adapters && typeof adapters === "object" ? { adapters } : {};
 }
 
 async function runSetupSmoke({ io, hostAgent }) {
@@ -238,6 +247,9 @@ export function parseRunArgs(args, io) {
     else if (arg === "--max-turns") options.maxTurns = positiveInt("--max-turns", next());
     else if (arg === "--max-minutes") options.maxMinutes = positiveInt("--max-minutes", next());
     else if (arg === "--turn-timeout-seconds") options.turnTimeoutSeconds = positiveInt("--turn-timeout-seconds", next());
+    else if (arg === "--turn-inactivity-seconds") options.turnInactivitySeconds = nonNegativeInt("--turn-inactivity-seconds", next());
+    else if (arg === "--claude-model") options.claudeModel = next();
+    else if (arg === "--codex-model") options.codexModel = next();
     else if (arg === "--max-tool-calls-per-turn") options.maxToolCallsPerTurn = positiveInt("--max-tool-calls-per-turn", next());
     else if (arg === "--max-control-retries") options.maxControlRetries = nonNegativeInt("--max-control-retries", next());
     else if (arg === "--json") options.json = true;
@@ -474,6 +486,12 @@ async function runResume(args, io) {
   // no result and no live process; a dual adapter failure leaves a blocked
   // result that is safe to retry once adapters are healthy again.
   const jobLive = job && ["starting", "running", "canceling"].includes(job.status) && processExists(job.pid);
+  // A heartbeat-derived stale flag can be wrong while the process is alive in
+  // a very long turn; resuming then would run two orchestrators against the
+  // same session files. Only a dead pid makes a stale job resumable.
+  if (stale && jobLive) {
+    throw new Error(`session ${sessionId} looks stale by heartbeat but its process (pid ${job.pid}) is still running; cancel it first if it is actually hung`);
+  }
   const stuckRunning = status === "running" && !result && !jobLive;
   const adapterFailureBlocked = status === "blocked" && result?.blocked_reason === "adapter_failure";
   if (!stale && !stuckRunning && !adapterFailureBlocked && !RESUMABLE_STATUSES.has(status)) {
@@ -531,6 +549,9 @@ function parseResumeOverrides(args, io) {
     else if (arg === "--max-turns") options.maxTurns = positiveInt("--max-turns", next());
     else if (arg === "--max-minutes") options.maxMinutes = positiveInt("--max-minutes", next());
     else if (arg === "--turn-timeout-seconds") options.turnTimeoutSeconds = positiveInt("--turn-timeout-seconds", next());
+    else if (arg === "--turn-inactivity-seconds") options.turnInactivitySeconds = nonNegativeInt("--turn-inactivity-seconds", next());
+    else if (arg === "--claude-model") options.claudeModel = next();
+    else if (arg === "--codex-model") options.codexModel = next();
     else if (arg === "--output") options.output = enumValue("--output", next(), ["compact", "verbose", "quiet"]);
     else if (arg === "--json") options.json = true;
     else throw new Error(`unsupported resume override: ${arg}`);
@@ -556,7 +577,13 @@ function withDerivedJobStatus(job) {
     return { ...job, derived_status: job.status };
   }
   const heartbeat = Date.parse(job.last_heartbeat_at || job.created_at || 0);
-  const staleByHeartbeat = heartbeat && Date.now() - heartbeat > (job.turn_timeout_seconds || 180) * 2000;
+  // Heartbeats are written once per completed turn, and one turn can
+  // legitimately span up to ~8 timeout windows: two primary control attempts
+  // (1x each), two extended-retry attempts (2x each), and two fallback-swap
+  // attempts (1x each). Stale detection needs headroom beyond that so a
+  // slow-but-alive background job is never flagged (and then canceled or
+  // concurrently resumed) while it is still making progress.
+  const staleByHeartbeat = heartbeat && Date.now() - heartbeat > (job.turn_timeout_seconds || DEFAULT_RUN_OPTIONS.turnTimeoutSeconds) * 9000;
   const staleByPid = job.pid && !processExists(job.pid);
   return {
     ...job,
@@ -685,6 +712,13 @@ Run examples:
   converge-loop setup
   converge-loop run --topic "Choose between SQLite and JSONL for local state"
   converge-loop run --artifact design.md --focus "Ask for pushback"
+  converge-loop run --topic "..." --claude-model sonnet --turn-timeout-seconds 600
+
+Turn budgets:
+  --turn-timeout-seconds <n>     absolute per-turn cap (default 420)
+  --turn-inactivity-seconds <n>  kill a turn with no CLI output for n seconds (default 120; 0 disables)
+  --claude-model / --codex-model per-run model override; persistent defaults live in
+                                 local-adapters.json under adapters.<name>.model
 `;
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "converge-loop",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Run multi-agent deliberation loops that debate, negotiate, and converge on any decision, design, or artifact.",
   "type": "module",
   "bin": {

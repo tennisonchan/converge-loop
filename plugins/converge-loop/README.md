@@ -56,6 +56,21 @@ Setup controls:
 
 If the default opposite-agent path is unavailable, converge-loop may use the primary host adapter as a degraded fallback and will disclose that in the result. If the requested scope cannot be provided symmetrically, such as `--web shared` before shared web support is implemented, the run blocks instead of silently widening or changing access.
 
+## Models and turn budgets
+
+Each local CLI participant uses its CLI's default model unless overridden. Per run, pass `--claude-model <model>` or `--codex-model <model>`. For a persistent default, add an `adapters` block to `local-adapters.json` in the converge-loop state directory (`converge-loop setup` prints its path and preserves this block across reruns):
+
+```json
+{
+  "adapters": {
+    "claude": { "model": "sonnet" },
+    "codex": { "model": "gpt-5" }
+  }
+}
+```
+
+Turn budgets: `--turn-timeout-seconds` (default 420) is an absolute per-turn cap, and `--turn-inactivity-seconds` (default 120, 0 disables) kills a turn whose CLI streams no output at all — a hung adapter dies fast while a slow-but-streaming model keeps its full window. A turn that hits either limit is retried once with both windows doubled before fallback handling applies, and no new attempt starts past `--max-minutes`. Large default models can need most of the timeout window for a deliberation turn; picking a faster model is usually the better fix than raising the cap.
+
 ## Verification
 
 From the repository root:
