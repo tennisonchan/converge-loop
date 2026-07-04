@@ -6,6 +6,8 @@
 
 The plugin is deliberately separate from `review-loop`. `review-loop` remains the deterministic final review gate. `converge-loop` is a deliberation tool: it helps agents debate, negotiate, ask for better ideas, inspect repo context, push back when useful, and converge.
 
+Like `review-loop`, `converge-loop` is a subject-agnostic facilitation engine. Callers own all subject detail — topic, focus, context packets, and artifacts — and the runtime must not assume the deliberation is about a plan, a repo, or software at all. The same mechanism serves architecture designs, product tradeoffs, and quick either/or decisions; only scope flags describe repo access, and they stay optional.
+
 ## Product Thesis
 
 The product replaces a manual workflow the operator already performs:
@@ -20,6 +22,7 @@ The product replaces a manual workflow the operator already performs:
 ## Goals
 
 - Support constructive pushback, debate, negotiation, and convergence.
+- Stay subject-agnostic: facilitate any deliberation, from architecture design to a quick decision, without baking subject assumptions into prompts, defaults, or outputs.
 - Use agents from different companies/providers by default for genuinely different model behavior.
 - Make the default installed-skill experience host-aware: `akx` (Codex) pairs with `akc` (Claude Code), and `akc` pairs with `akx`.
 - Use the primary agent's sub-agent as a degraded fallback when an external participant is unavailable.

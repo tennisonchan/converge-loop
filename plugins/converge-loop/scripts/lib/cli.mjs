@@ -654,8 +654,8 @@ function helpText() {
 
 Run examples:
   converge-loop setup
-  converge-loop run --topic "Improve this plan"
-  converge-loop run --artifact plan.md --focus "Ask for pushback"
+  converge-loop run --topic "Choose between SQLite and JSONL for local state"
+  converge-loop run --artifact design.md --focus "Ask for pushback"
 `;
 }
 

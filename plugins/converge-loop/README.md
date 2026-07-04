@@ -1,6 +1,8 @@
 # converge-loop
 
-`converge-loop` is a local Codex plugin for multi-agent deliberation.
+`converge-loop` is a local plugin for multi-agent deliberation, installable from Codex and Claude Code.
+
+Like `review-loop`, it is a subject-agnostic facilitation engine: callers provide the topic, focus, context, and artifacts; higher-level agents decide what to deliberate and what the conclusion feeds. It works the same for architecture designs, product tradeoffs, and quick either/or decisions.
 
 It is intentionally separate from `review-loop`:
 
@@ -28,14 +30,14 @@ From the repository root, enter the plugin directory and run the command with No
 ```bash
 cd plugins/converge-loop
 node scripts/bin/converge-loop.mjs setup
-node scripts/bin/converge-loop.mjs run --topic "Improve this plan"
+node scripts/bin/converge-loop.mjs run --topic "Decide the retention default for exported sessions"
 ```
 
 After package linking, package installation, or Codex plugin installation, use the bin directly:
 
 ```bash
 converge-loop setup
-converge-loop run --topic "Improve this plan"
+converge-loop run --topic "Decide the retention default for exported sessions"
 converge-loop status
 converge-loop result <session-id>
 converge-loop cancel <session-id>

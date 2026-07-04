@@ -1,7 +1,7 @@
 {
   "name": "converge-loop",
   "version": "0.1.0",
-  "description": "Run multi-agent deliberation loops that debate, negotiate, and converge on stronger plans.",
+  "description": "Run multi-agent deliberation loops that debate, negotiate, and converge on any decision, design, or artifact.",
   "author": {
     "name": "Tennison Chan"
   },
@@ -11,14 +11,15 @@
   "keywords": [
     "multi-agent",
     "deliberation",
-    "planning",
+    "decision-making",
+    "design-review",
     "agent-collaboration"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "converge-loop",
-    "shortDescription": "Multi-agent debate and convergence for plans and decisions",
-    "longDescription": "Use converge-loop to orchestrate constructive back-and-forth between agents, gather evidence, surface pushback, and converge on a stronger plan or a clear unresolved decision point.",
+    "shortDescription": "Multi-agent debate and convergence for any decision, design, or artifact",
+    "longDescription": "Use converge-loop to orchestrate constructive back-and-forth between agents, gather evidence, surface pushback, and converge on a shared conclusion or a clear unresolved decision point. The engine is subject-agnostic: architecture designs, product tradeoffs, quick either/or decisions, or any artifact the caller supplies.",
     "developerName": "Tennison Chan",
     "category": "Developer Tools",
     "capabilities": [
@@ -26,8 +27,8 @@
       "Read"
     ],
     "defaultPrompt": [
-      "Use converge-loop to strengthen this plan",
       "Have two agents debate this decision",
+      "Use converge-loop to pressure-test this design",
       "Find pushback and better ideas for this artifact"
     ],
     "brandColor": "#2563EB"
