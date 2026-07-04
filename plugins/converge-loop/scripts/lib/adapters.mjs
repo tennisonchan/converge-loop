@@ -2,7 +2,9 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { parseParticipantOutput } from "./control.mjs";
-import { commandExists, nowIso } from "./util.mjs";
+import { commandExists, defaultStateRoot, nowIso, readJson, writeJson } from "./util.mjs";
+
+const LOCAL_ADAPTER_CONFIG_SCHEMA = "converge-loop.local-adapters.v1";
 
 const BASE_FAKE_CAPABILITIES = {
   class: "tool-proxy",
@@ -74,6 +76,43 @@ export function preflightParticipants(participants, options, env = process.env) 
   const capabilityFailure = firstCapabilityFailure(checked, options);
   if (capabilityFailure) return { ...capabilityFailure, checked };
   return { ok: true, checked };
+}
+
+export function localAdapterConfigPath(env = process.env) {
+  return path.join(defaultStateRoot(env), "config", "local-adapters.json");
+}
+
+export function readLocalAdapterConfig(env = process.env) {
+  try {
+    return readJson(localAdapterConfigPath(env));
+  } catch {
+    return null;
+  }
+}
+
+export function writeLocalAdapterConfig(env = process.env, payload) {
+  writeJson(localAdapterConfigPath(env), {
+    schema_version: LOCAL_ADAPTER_CONFIG_SCHEMA,
+    ...payload
+  });
+}
+
+export function checkLocalCliReadiness(env = process.env) {
+  const checks = {
+    node: checkCommand(process.execPath, ["--version"], { requiredText: /^v\d+/ }),
+    codex: checkLocalCliAdapter("codex", env),
+    claude: checkLocalCliAdapter("claude", env)
+  };
+  const ok = checks.node.ok && checks.codex.ok && checks.claude.ok;
+  return {
+    ok,
+    checks,
+    config_path: localAdapterConfigPath(env),
+    read_only_controls: {
+      codex: "sandbox-read-only",
+      claude: "tool-denylist-plan-mode"
+    }
+  };
 }
 
 function checkParticipants(participants, options, env) {
@@ -194,19 +233,20 @@ class LocalCliAdapter {
     if (testUnavailableAdapters(env).includes(this.name)) {
       return { ok: false, reason: `${this.name} adapter forced unavailable by test preflight` };
     }
-    if (env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS !== "1") {
+    if (!localCliAdaptersEnabled(env)) {
       return {
         ok: false,
-        reason: `${this.name} adapter is fail-closed; set CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS=1 only after verifying local read-only controls`
+        reason: `${this.name} local CLI adapter is not enabled; run \`converge-loop setup\` to verify read-only controls`
       };
     }
     if (env.CONVERGE_LOOP_ASSUME_LOCAL_CLI_PREFLIGHT === "1") {
       return this.capabilities(options);
     }
-    if (!commandExists(this.name)) {
-      return { ok: false, reason: `${this.name} executable not found` };
+    const command = localCliCommandName(this.name, env);
+    if (!commandExists(command, env)) {
+      return { ok: false, reason: `${command} executable not found` };
     }
-    const help = spawnSync(this.name, [this.name === "codex" ? "exec" : "--help", "--help"].filter(Boolean), {
+    const help = spawnSync(command, [this.name === "codex" ? "exec" : "--help", "--help"].filter(Boolean), {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"]
     });
@@ -247,9 +287,9 @@ class LocalCliAdapter {
     if (this.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE === "1") {
       return defaultFakeTurn({ participant, turnIndex: options.__turnIndex || 0, options });
     }
-    const command = this.name;
+    const command = localCliCommandName(this.name, this.env);
     const args = this.name === "codex"
-      ? ["exec", "--sandbox", "read-only", "--ask-for-approval", "never", "--cd", options.cwd, "-"]
+      ? ["exec", "--sandbox", "read-only", "--cd", options.cwd, "-"]
       : [
           "--print",
           "--permission-mode",
@@ -263,6 +303,63 @@ class LocalCliAdapter {
     const output = await runWithTimeout(command, args, this.name === "codex" ? prompt : null, options.turnTimeoutSeconds * 1000);
     return parseParticipantOutput(output, { nonce, participant });
   }
+}
+
+function localCliAdaptersEnabled(env) {
+  if (env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS === "1") return true;
+  const config = readLocalAdapterConfig(env);
+  return Boolean(
+    config?.schema_version === LOCAL_ADAPTER_CONFIG_SCHEMA &&
+    config.enabled === true &&
+    config.checks?.codex?.ok === true &&
+    config.checks?.claude?.ok === true
+  );
+}
+
+function checkLocalCliAdapter(name, env) {
+  const command = localCliCommandName(name, env);
+  if (!commandExists(command, env)) {
+    return { ok: false, command, reason: `${command} executable not found` };
+  }
+  const helpArgs = name === "codex" ? ["exec", "--help"] : ["--help"];
+  const required = name === "codex"
+    ? ["--sandbox", "--cd"]
+    : ["--print", "--permission-mode", "--disallowedTools", "--output-format"];
+  const help = spawnSync(command, helpArgs, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  const text = `${help.stdout || ""}\n${help.stderr || ""}`;
+  if (help.status !== 0) {
+    return { ok: false, command, reason: `${command} help command failed`, status: help.status };
+  }
+  const missing = required.filter((flag) => !text.includes(flag));
+  if (missing.length) {
+    return { ok: false, command, reason: `${name} missing required read-only flags: ${missing.join(", ")}` };
+  }
+  return { ok: true, command, required_flags: required };
+}
+
+function localCliCommandName(name, env) {
+  return env[`CONVERGE_LOOP_${name.toUpperCase()}_BIN`] || name;
+}
+
+function checkCommand(command, args, { requiredText = null, env = process.env } = {}) {
+  if (!commandExists(command, env)) {
+    return { ok: false, command, reason: `${command} executable not found` };
+  }
+  const result = spawnSync(command, args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  const text = `${result.stdout || ""}\n${result.stderr || ""}`;
+  if (result.status !== 0) {
+    return { ok: false, command, reason: `${command} ${args.join(" ")} failed`, status: result.status };
+  }
+  if (requiredText && !requiredText.test(text)) {
+    return { ok: false, command, reason: `${command} output did not match readiness expectation` };
+  }
+  return { ok: true, command, output: text.trim().split(/\n/)[0] || "" };
 }
 
 function testUnavailableAdapters(env) {
