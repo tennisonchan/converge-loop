@@ -15,12 +15,14 @@ Use this skill when the user wants agents to reason together before execution or
 The plugin includes a Node.js command runtime. From Codex, invoke it with the Codex host identity:
 
 ```bash
+CONVERGE_LOOP_HOST=codex converge-loop setup
 CONVERGE_LOOP_HOST=codex converge-loop run --topic "Improve this plan"
 ```
 
 From the plugin source, invoke the same runtime directly:
 
 ```bash
+CONVERGE_LOOP_HOST=codex node scripts/bin/converge-loop.mjs setup
 CONVERGE_LOOP_HOST=codex node scripts/bin/converge-loop.mjs run --topic "Improve this plan"
 ```
 
@@ -31,6 +33,8 @@ Default participant selection should mirror `review-loop`:
 - If the secondary opposite-agent path is unavailable, use the primary agent's restricted sub-agent fallback only as degraded coverage and disclose that degradation.
 
 The Codex skill owns `CONVERGE_LOOP_HOST=codex`; users should not need to set host identity manually. The Claude command surface uses `CLAUDE_PLUGIN_ROOT` and lets the runtime infer `claude`.
+
+Run `converge-loop setup` before real local-agent deliberation. Setup verifies local `codex` and `claude` CLIs plus required read-only flag availability, then writes readiness config. Normal users should not need to set local-adapter environment variables.
 
 Do not pass fake adapters for normal user-facing deliberation. `fake-sequence`, `fake-replay`, and `fake-tooling` are deterministic verification adapters only; results from them must be described as smoke/test coverage, not independent provider deliberation.
 
@@ -44,7 +48,7 @@ When helping evolve this plugin:
 4. Do not force disagreement. Encourage constructive pushback, better ideas, evidence requests, and convergence.
 5. Keep human intervention optional unless the operator opts in or interrupts.
 6. Do not add implementation, file edits, or review-gate semantics to `converge-loop`; downstream action belongs to the host agent and deterministic validation belongs to `review-loop`.
-7. Prefer deterministic fake adapters for local verification. Real provider adapters are fail-closed unless read-only preflight checks prove safe execution.
+7. Prefer deterministic fake adapters for local verification. Real provider adapters are fail-closed until `converge-loop setup` verifies read-only controls.
 
 For the current design, read:
 

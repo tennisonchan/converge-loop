@@ -108,9 +108,10 @@ export function defaultStateRoot(env = process.env, platform = process.platform)
   return path.join(os.homedir(), ".local", "state", "converge-loop");
 }
 
-export function commandExists(command) {
+export function commandExists(command, env = process.env) {
   const result = spawnSync("command", ["-v", command], {
     shell: true,
+    env,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"]
   });
