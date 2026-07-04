@@ -635,6 +635,19 @@ test("participant output schema satisfies OpenAI strict structured-output rules"
   checkStrict(schema, "schema");
 });
 
+test("manifest and marketplace versions stay in lockstep", () => {
+  const rootDir = path.join(repoRoot, "..", "..");
+  const versions = {
+    "package.json": JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")).version,
+    ".codex-plugin/plugin.json": JSON.parse(fs.readFileSync(path.join(repoRoot, ".codex-plugin", "plugin.json"), "utf8")).version,
+    ".claude-plugin/plugin.json": JSON.parse(fs.readFileSync(path.join(repoRoot, ".claude-plugin", "plugin.json"), "utf8")).version,
+    "marketplace metadata": JSON.parse(fs.readFileSync(path.join(rootDir, ".claude-plugin", "marketplace.json"), "utf8")).metadata.version,
+    "marketplace plugin": JSON.parse(fs.readFileSync(path.join(rootDir, ".claude-plugin", "marketplace.json"), "utf8")).plugins[0].version
+  };
+  const distinct = [...new Set(Object.values(versions))];
+  assert.equal(distinct.length, 1, `version drift: ${JSON.stringify(versions)}`);
+});
+
 test("claude marketplace exposes the plugin from the repository root", () => {
   const marketplacePath = path.join(repoRoot, "..", "..", ".claude-plugin", "marketplace.json");
   const marketplace = JSON.parse(fs.readFileSync(marketplacePath, "utf8"));

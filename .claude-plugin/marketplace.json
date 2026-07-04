@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Multi-agent deliberation loops that debate, negotiate, and converge on any decision, design, or artifact.",
-    "version": "0.1.1"
+    "version": "0.2.0"
   },
   "plugins": [
     {
       "name": "converge-loop",
       "description": "Run multi-agent deliberation loops from Claude Code.",
-      "version": "0.1.1",
+      "version": "0.2.0",
       "author": {
         "name": "Tennison Chan"
       },
