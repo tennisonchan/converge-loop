@@ -144,6 +144,11 @@ function readResult(stateRoot, id) {
   return JSON.parse(fs.readFileSync(resultPath(stateRoot, id), "utf8"));
 }
 
+function readTurns(stateRoot, id) {
+  const file = path.join(stateRoot, "sessions", id, "turns.jsonl");
+  return fs.readFileSync(file, "utf8").trim().split(/\n+/).filter(Boolean).map((line) => JSON.parse(line));
+}
+
 test("fake sequence run persists normalized session result", async () => {
   const stateRoot = tempRoot("run");
   const result = await cli([
@@ -630,6 +635,55 @@ test("max turns and read-only violations produce terminal results", async () => 
   assert.equal(JSON.parse(blocked.stdout).status, "blocked");
 });
 
+test("stalled adapter turn records adapter failure instead of remaining running", async () => {
+  const stateRoot = tempRoot("adapter-timeout");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      {
+        message: "proposer completed",
+        control: { status: "continue", improvements: ["first turn persisted"], ready_to_converge: false }
+      },
+      {
+        attempts: [
+          "critic first attempt has no control block",
+          {
+            delay_ms: 1500,
+            message: "critic repair would eventually respond",
+            control: { status: "agreed", agreements: ["too late"], ready_to_converge: true }
+          }
+        ]
+      }
+    ]
+  });
+  const result = await cli([
+    "run",
+    "--agents",
+    "fake-sequence,fake-sequence",
+    "--topic",
+    "adapter timeout",
+    "--fixture",
+    fixture,
+    "--turn-timeout-seconds",
+    "1",
+    "--json"
+  ], stateRoot);
+  assert.equal(result.code, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.status, "blocked");
+  assert.match(parsed.summary, /^Adapter failure: fake-sequence participant turn timed out after 1000ms/);
+
+  const sessionId = findSingleSessionId(stateRoot);
+  const session = JSON.parse(fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "session.json"), "utf8"));
+  const turns = readTurns(stateRoot, sessionId);
+  assert.equal(session.state, "blocked");
+  assert.equal(session.current_turn_index, 2);
+  assert.equal(turns.length, 2);
+  assert.equal(turns[0].message, "proposer completed");
+  assert.equal(turns[0].violation, null);
+  assert.equal(turns[1].violation.type, "adapter_failure");
+  assert.match(turns[1].message, /Adapter failed: fake-sequence participant turn timed out after 1000ms/);
+});
+
 test("result export requires explicit versioned export when destination is tracked-visible", async () => {
   const stateRoot = tempRoot("export");
   const run = await cli([
@@ -959,6 +1013,39 @@ test("missing control block triggers a repair retry before counting as no progre
     .trim().split(/\n+/).map((line) => JSON.parse(line));
   assert.equal(turns[0].message, "repaired");
   assert.deepEqual(turns[0].control.improvements, ["x"]);
+});
+
+test("top-level fixture delay applies to string and structured attempts", async () => {
+  const stateRoot = tempRoot("attempt-delay");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      {
+        delay_ms: 50,
+        attempts: [
+          "free text with no control block",
+          { message: "repaired", control: { status: "continue", improvements: ["delayed repair"], ready_to_converge: false } }
+        ]
+      },
+      { message: "agreed", control: { status: "agreed", agreements: ["done"], ready_to_converge: true } }
+    ]
+  });
+  const started = Date.now();
+  const result = await cli([
+    "run",
+    "--agents", "fake-replay,fake-replay",
+    "--topic", "attempt delay",
+    "--fixture", fixture,
+    "--json"
+  ], stateRoot);
+  const elapsedMs = Date.now() - started;
+  assert.equal(result.code, 0, result.stderr);
+  assert.ok(elapsedMs >= 90, `expected both attempts to use top-level delay, elapsed ${elapsedMs}ms`);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.status, "agreed");
+  const sessionId = findSingleSessionId(stateRoot);
+  const turns = readTurns(stateRoot, sessionId);
+  assert.equal(turns[0].message, "repaired");
+  assert.deepEqual(turns[0].control.improvements, ["delayed repair"]);
 });
 
 test("resume seeds latest controls and result aggregates from pre-resume turns", async () => {
