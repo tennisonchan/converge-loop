@@ -514,6 +514,22 @@ test("background job records host and cancel-before-init preserves it", async ()
   assert.equal(readResult(stateRoot, sessionId).host_agent, "claude");
 });
 
+test("participant output schema satisfies OpenAI strict structured-output rules", () => {
+  const schema = JSON.parse(fs.readFileSync(path.join(repoRoot, "schemas", "participant-output.schema.json"), "utf8"));
+  const checkStrict = (node, at) => {
+    if (!node || typeof node !== "object") return;
+    if (node.type === "object" && node.properties) {
+      assert.equal(node.additionalProperties, false, `${at} must set additionalProperties false`);
+      const keys = Object.keys(node.properties).sort();
+      const required = [...(node.required || [])].sort();
+      assert.deepEqual(required, keys, `${at} required must list every property`);
+      for (const [key, child] of Object.entries(node.properties)) checkStrict(child, `${at}.${key}`);
+    }
+    if (node.items) checkStrict(node.items, `${at}[]`);
+  };
+  checkStrict(schema, "schema");
+});
+
 test("claude marketplace exposes the plugin from the repository root", () => {
   const marketplacePath = path.join(repoRoot, "..", "..", ".claude-plugin", "marketplace.json");
   const marketplace = JSON.parse(fs.readFileSync(marketplacePath, "utf8"));

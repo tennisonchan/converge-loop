@@ -3,7 +3,10 @@
   "title": "converge-loop participant output",
   "type": "object",
   "additionalProperties": false,
-  "required": ["message", "control"],
+  "required": [
+    "message",
+    "control"
+  ],
   "properties": {
     "message": {
       "type": "string",
@@ -12,35 +15,102 @@
     "control": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["status", "ready_to_converge"],
+      "required": [
+        "status",
+        "confidence",
+        "agreements",
+        "pushbacks",
+        "minor_reservations",
+        "improvements",
+        "open_questions",
+        "evidence_used",
+        "evidence_requests",
+        "concessions",
+        "ready_to_converge",
+        "operator_intervention_points",
+        "next_prompt_suggestion"
+      ],
       "properties": {
         "status": {
           "type": "string",
-          "enum": ["continue", "agreed", "needs_evidence", "operator_intervention", "blocked"]
+          "enum": [
+            "continue",
+            "agreed",
+            "needs_evidence",
+            "operator_intervention",
+            "blocked"
+          ]
         },
         "confidence": {
           "type": "string",
-          "enum": ["low", "medium", "high"]
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
         },
-        "agreements": { "type": "array", "items": { "type": "string" } },
+        "agreements": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "pushbacks": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Core, big-picture blockers that must change the conclusion. These block convergence."
         },
         "minor_reservations": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Smaller disagreements the participant can live with. Disclosed in the result but do not block convergence."
         },
-        "improvements": { "type": "array", "items": { "type": "string" } },
-        "open_questions": { "type": "array", "items": { "type": "string" } },
-        "evidence_used": { "type": "array", "items": { "type": "string" } },
-        "evidence_requests": { "type": "array", "items": { "type": "string" } },
-        "concessions": { "type": "array", "items": { "type": "string" } },
-        "ready_to_converge": { "type": "boolean" },
-        "operator_intervention_points": { "type": "array", "items": { "type": "string" } },
-        "next_prompt_suggestion": { "type": "string" }
+        "improvements": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "open_questions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence_used": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence_requests": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "concessions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ready_to_converge": {
+          "type": "boolean"
+        },
+        "operator_intervention_points": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "next_prompt_suggestion": {
+          "type": "string"
+        }
       }
     }
   }

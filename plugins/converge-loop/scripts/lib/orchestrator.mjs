@@ -165,6 +165,7 @@ export async function runSession({ store, options, stdout, env, sessionId = null
           session.participants = participants;
           store.writeSession(session);
           writeFallbackDisclosure({ store, session, participants, active: true });
+          store.writeTranscript(session.id, `\n## Invoke-time fallback (turn ${turnIndex + 1})\n\n- ${participant.fallback_for} failed: ${redact(failure.message)}\n- ${participant.adapter} continues as a degraded fallback.\n\n`);
           printNote(stdout, options, `participant ${participant.id} degraded fallback: ${participant.fallback_for} -> ${participant.adapter}`);
           try {
             parsed = await runTurnAttempts({ ...attemptArgs, adapter, participant });
