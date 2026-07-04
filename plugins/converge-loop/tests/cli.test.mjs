@@ -6,7 +6,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildParticipants } from "../scripts/lib/adapters.mjs";
 import { runCli } from "../scripts/lib/cli.mjs";
-import { parseParticipantOutput } from "../scripts/lib/control.mjs";
+import { hasNewProgress, parseParticipantOutput } from "../scripts/lib/control.mjs";
+import { buildTurnPrompt, loadMaterials } from "../scripts/lib/orchestrator.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const binPath = path.join(repoRoot, "scripts/bin/converge-loop.mjs");
@@ -50,13 +51,14 @@ function writeLocalCliPair(dir, overrides = {}) {
   fs.mkdirSync(dir, { recursive: true });
   const codex = path.join(dir, "codex");
   const claude = path.join(dir, "claude");
-  const codexHelp = overrides.codexHelp || "Usage: codex exec --sandbox --cd --ignore-user-config";
-  const claudeHelp = overrides.claudeHelp || "Usage: claude --print --permission-mode --disallowedTools --output-format --safe-mode";
+  const codexHelp = overrides.codexHelp || "Usage: codex exec --sandbox --cd --ignore-user-config --output-schema --output-last-message";
+  const claudeHelp = overrides.claudeHelp || "Usage: claude --print --permission-mode --disallowedTools --output-format --safe-mode --json-schema";
   const codexAuth = overrides.codexAuth ?? "Logged in using ChatGPT\n";
   const claudeAuth = overrides.claudeAuth ?? "{\"loggedIn\":true,\"authMethod\":\"oauth\"}\n";
   const codexAuthExit = overrides.codexAuthExit ?? 0;
   const claudeAuthExit = overrides.claudeAuthExit ?? 0;
   fs.writeFileSync(codex, `#!/usr/bin/env node
+const fs = require("node:fs");
 const args = process.argv.slice(2);
 if (args[0] === "exec" && args[1] === "--help") {
   process.stdout.write(${JSON.stringify(`${codexHelp}\n`)});
@@ -71,13 +73,23 @@ if (args[0] === "exec") {
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", (chunk) => { input += chunk; });
   process.stdin.on("end", () => {
+    const structured = {
+      message: "codex smoke ok",
+      control: {
+        status: "agreed",
+        confidence: "high",
+        agreements: ["codex local cli invoked"],
+        ready_to_converge: true
+      }
+    };
+    const outIndex = args.indexOf("--output-last-message");
+    if (outIndex !== -1 && args[outIndex + 1]) {
+      fs.writeFileSync(args[outIndex + 1], JSON.stringify(structured));
+      process.stdout.write("codex smoke ok\\n");
+      return;
+    }
     const nonce = /<<<CONVERGE_LOOP_CONTROL ([a-f0-9]+)>>>/i.exec(input)?.[1] || "missing";
-    process.stdout.write("codex smoke ok\\n<<<CONVERGE_LOOP_CONTROL " + nonce + ">>>\\n" + JSON.stringify({
-      status: "agreed",
-      confidence: "high",
-      agreements: ["codex local cli invoked"],
-      ready_to_converge: true
-    }) + "\\n<<<END_CONVERGE_LOOP_CONTROL " + nonce + ">>>\\n");
+    process.stdout.write("codex smoke ok\\n<<<CONVERGE_LOOP_CONTROL " + nonce + ">>>\\n" + JSON.stringify(structured.control) + "\\n<<<END_CONVERGE_LOOP_CONTROL " + nonce + ">>>\\n");
   });
 } else {
   process.stdout.write("codex\\n");
@@ -93,14 +105,30 @@ if (args[0] === "auth" && args[1] === "status" && args[2] === "--json") {
   process.stdout.write(${JSON.stringify(claudeAuth)});
   process.exit(${claudeAuthExit});
 }
-const prompt = args.join(" ");
-const nonce = /<<<CONVERGE_LOOP_CONTROL ([a-f0-9]+)>>>/i.exec(prompt)?.[1] || "missing";
-process.stdout.write("claude smoke ok\\n<<<CONVERGE_LOOP_CONTROL " + nonce + ">>>\\n" + JSON.stringify({
-  status: "agreed",
-  confidence: "high",
-  agreements: ["claude local cli invoked"],
-  ready_to_converge: true
-}) + "\\n<<<END_CONVERGE_LOOP_CONTROL " + nonce + ">>>\\n");
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const structured = {
+    message: "claude smoke ok",
+    control: {
+      status: "agreed",
+      confidence: "high",
+      agreements: ["claude local cli invoked"],
+      ready_to_converge: true
+    }
+  };
+  if (args.includes("--json-schema")) {
+    process.stdout.write(JSON.stringify({
+      is_error: false,
+      result: "claude smoke ok",
+      structured_output: structured
+    }) + "\\n");
+    return;
+  }
+  const nonce = /<<<CONVERGE_LOOP_CONTROL ([a-f0-9]+)>>>/i.exec(input)?.[1] || "missing";
+  process.stdout.write("claude smoke ok\\n<<<CONVERGE_LOOP_CONTROL " + nonce + ">>>\\n" + JSON.stringify(structured.control) + "\\n<<<END_CONVERGE_LOOP_CONTROL " + nonce + ">>>\\n");
+});
 `);
   fs.chmodSync(codex, 0o755);
   fs.chmodSync(claude, 0o755);
@@ -790,6 +818,229 @@ test("cancel marks a running background job canceled", async () => {
   assert.equal(cancel.code, 0, cancel.stderr);
   await waitFor(() => fs.existsSync(resultPath(stateRoot, sessionId)));
   assert.equal(readResult(stateRoot, sessionId).status, "canceled");
+});
+
+test("turn prompt carries safety preamble, materials, transcript, and convergence contract", () => {
+  const dir = tempRoot("prompt");
+  const artifact = path.join(dir, "plan.md");
+  fs.writeFileSync(artifact, "PLAN BODY CONTENT");
+  const participants = [
+    { id: "p1", adapter: "codex", role: "proposer" },
+    { id: "p2", adapter: "claude", role: "critic" }
+  ];
+  const transcript = [{
+    turn_index: 0,
+    participant_role: "proposer",
+    adapter: "codex",
+    message: "proposal detail",
+    control: { status: "continue", improvements: ["improve X"], ready_to_converge: true }
+  }];
+  const prompt = buildTurnPrompt({
+    options: { topic: "storage design", focus: "converge", scope: "working-tree", cwd: "/repo", artifact, context: null },
+    participant: participants[1],
+    participants,
+    transcript,
+    nonce: "abc123",
+    controlMode: "nonce-block",
+    materials: loadMaterials({ artifact, context: null }),
+    latestControls: new Map([["p1", { status: "continue", ready_to_converge: true }]])
+  });
+  assert.match(prompt, /read-only deliberation/i);
+  assert.match(prompt, /Do not perform host-agent task management/);
+  assert.match(prompt, /PLAN BODY CONTENT/);
+  assert.match(prompt, /proposal detail/);
+  assert.match(prompt, /improvements: improve X/);
+  assert.match(prompt, /minor_reservations/);
+  assert.match(prompt, /counterpart is ready to converge/i);
+  assert.match(prompt, /<<<CONVERGE_LOOP_CONTROL abc123>>>/);
+
+  const schemaPrompt = buildTurnPrompt({
+    options: { topic: "storage design", scope: "none", cwd: "/repo" },
+    participant: participants[0],
+    participants,
+    transcript: [],
+    nonce: "abc123",
+    controlMode: "json-schema"
+  });
+  assert.match(schemaPrompt, /satisfy the provided output schema/);
+  assert.doesNotMatch(schemaPrompt, /<<<CONVERGE_LOOP_CONTROL/);
+});
+
+test("one participant declaring agreed with core pushbacks does not end the session agreed", async () => {
+  const stateRoot = tempRoot("core-pushback");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      { message: "ready", control: { status: "agreed", agreements: ["direction"], ready_to_converge: true } },
+      { message: "agree but blocked", control: { status: "agreed", ready_to_converge: true, pushbacks: ["storage model is wrong"] } }
+    ]
+  });
+  const result = await cli([
+    "run",
+    "--agents", "fake-replay,fake-replay",
+    "--topic", "core pushback",
+    "--fixture", fixture,
+    "--max-turns", "2",
+    "--json"
+  ], stateRoot);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.status, "max_turns");
+  assert.deepEqual(parsed.remaining_disagreements, ["storage model is wrong"]);
+});
+
+test("minor reservations do not block convergence and are disclosed", async () => {
+  const stateRoot = tempRoot("minor");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      { message: "proposal", control: { status: "continue", improvements: ["tighten scope"], ready_to_converge: false } },
+      { message: "core pushback", control: { status: "continue", pushbacks: ["storage model is wrong"], ready_to_converge: false } },
+      { message: "concede storage", control: { status: "continue", concessions: ["adopt suggested storage model"], ready_to_converge: true } },
+      { message: "core agreed", control: { status: "agreed", ready_to_converge: true, minor_reservations: ["naming could be better"] } }
+    ]
+  });
+  const result = await cli([
+    "run",
+    "--agents", "fake-replay,fake-replay",
+    "--topic", "minor reservations",
+    "--fixture", fixture,
+    "--json"
+  ], stateRoot);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.status, "agreed");
+  assert.equal(parsed.turn_count, 4);
+  assert.deepEqual(parsed.remaining_disagreements, []);
+  assert.deepEqual(parsed.minor_reservations, ["naming could be better"]);
+  assert.deepEqual(parsed.pushbacks_resolved, ["storage model is wrong"]);
+  assert.match(parsed.summary, /minor reservations remain/i);
+});
+
+test("repeated identical positions end as clear disagreement instead of running to max turns", async () => {
+  const stateRoot = tempRoot("repeat");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      { message: "position A", control: { status: "continue", pushbacks: ["A"], ready_to_converge: false } },
+      { message: "position B", control: { status: "continue", pushbacks: ["B"], ready_to_converge: false } },
+      { message: "position A again", control: { status: "continue", pushbacks: ["A"], ready_to_converge: false } },
+      { message: "position B again", control: { status: "continue", pushbacks: ["B"], ready_to_converge: false } }
+    ]
+  });
+  const result = await cli([
+    "run",
+    "--agents", "fake-replay,fake-replay",
+    "--topic", "repetition",
+    "--fixture", fixture,
+    "--json"
+  ], stateRoot);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.status, "clear_disagreement");
+  assert.equal(parsed.turn_count, 4);
+  assert.deepEqual(parsed.remaining_disagreements.sort(), ["A", "B"]);
+});
+
+test("missing control block triggers a repair retry before counting as no progress", async () => {
+  const stateRoot = tempRoot("repair");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      { attempts: ["free text with no control block", { message: "repaired", control: { status: "continue", improvements: ["x"], ready_to_converge: false } }] },
+      { message: "agreed", control: { status: "agreed", agreements: ["fine"], ready_to_converge: true } }
+    ]
+  });
+  const result = await cli([
+    "run",
+    "--agents", "fake-replay,fake-replay",
+    "--topic", "repair",
+    "--fixture", fixture,
+    "--json"
+  ], stateRoot);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.status, "agreed");
+  const sessionId = findSingleSessionId(stateRoot);
+  const turns = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "turns.jsonl"), "utf8")
+    .trim().split(/\n+/).map((line) => JSON.parse(line));
+  assert.equal(turns[0].message, "repaired");
+  assert.deepEqual(turns[0].control.improvements, ["x"]);
+});
+
+test("resume seeds latest controls and result aggregates from pre-resume turns", async () => {
+  const stateRoot = tempRoot("resume-seed");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      { message: "opening", control: { status: "needs_evidence", agreements: ["A0"], pushbacks: ["P0"], evidence_requests: ["logs"] } },
+      { message: "evidence in hand", control: { status: "continue", concessions: ["logs reviewed"], ready_to_converge: true } },
+      { message: "withdraw pushback", control: { status: "agreed", agreements: ["A2"], ready_to_converge: true } },
+      { message: "confirm", control: { status: "agreed", ready_to_converge: true } }
+    ]
+  });
+  const first = await cli([
+    "run",
+    "--agents", "fake-replay,fake-replay",
+    "--topic", "resume seeding",
+    "--fixture", fixture,
+    "--json"
+  ], stateRoot);
+  assert.equal(JSON.parse(first.stdout).status, "needs_evidence");
+  const sessionId = findSingleSessionId(stateRoot);
+  const resumed = await cli(["resume", sessionId, "--fixture", fixture, "--json"], stateRoot);
+  assert.equal(resumed.code, 0, resumed.stderr);
+  const result = readResult(stateRoot, sessionId);
+  assert.equal(result.status, "agreed");
+  assert.ok(result.agreements.includes("A0"), "pre-resume agreements survive resume");
+  assert.ok(result.agreements.includes("A2"));
+  assert.deepEqual(result.pushbacks_resolved, ["P0"]);
+  assert.deepEqual(result.remaining_disagreements, []);
+});
+
+test("withdrawing a pushback without adding items still counts as progress", () => {
+  assert.equal(hasNewProgress(
+    { status: "continue", pushbacks: [], ready_to_converge: false },
+    { status: "continue", pushbacks: ["A"], ready_to_converge: false }
+  ), true);
+  assert.equal(hasNewProgress(
+    { status: "continue", pushbacks: ["A"], ready_to_converge: false },
+    { status: "continue", pushbacks: ["A"], ready_to_converge: false }
+  ), false);
+});
+
+test("--max-control-retries 0 disables repair retries", async () => {
+  const stateRoot = tempRoot("no-retries");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      { attempts: ["first attempt has no control", { message: "would repair", control: { status: "continue", improvements: ["x"] } }] },
+      { message: "agreed", control: { status: "agreed", ready_to_converge: true } }
+    ]
+  });
+  const result = await cli([
+    "run",
+    "--agents", "fake-replay,fake-replay",
+    "--topic", "no retries",
+    "--fixture", fixture,
+    "--max-control-retries", "0",
+    "--json"
+  ], stateRoot);
+  assert.equal(result.code, 0, result.stderr);
+  const sessionId = findSingleSessionId(stateRoot);
+  const turns = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "turns.jsonl"), "utf8")
+    .trim().split(/\n+/).map((line) => JSON.parse(line));
+  assert.equal(turns[0].message, "first attempt has no control");
+});
+
+test("exhausted control repairs record the raw reply and end without progress", async () => {
+  const stateRoot = tempRoot("repair-exhausted");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      { attempts: ["still no control block", "still no control block either"] },
+      { attempts: ["nothing parseable", "nothing parseable again"] }
+    ]
+  });
+  const result = await cli([
+    "run",
+    "--agents", "fake-replay,fake-replay",
+    "--topic", "repair exhausted",
+    "--fixture", fixture,
+    "--json"
+  ], stateRoot);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.status, "blocked");
+  assert.match(parsed.summary, /No progress was detected/);
 });
 
 function findSingleSessionId(stateRoot) {

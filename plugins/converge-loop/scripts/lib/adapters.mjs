@@ -1,15 +1,27 @@
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseParticipantOutput } from "./control.mjs";
 import { commandExists, defaultStateRoot, nowIso, readJson, writeJson } from "./util.mjs";
 
 const LOCAL_ADAPTER_CONFIG_SCHEMA = "converge-loop.local-adapters.v1";
 // Keep this in sync with LocalCliAdapter.invoke; setup and runtime preflight assert these flags.
 export const LOCAL_CLI_REQUIRED_FLAGS = Object.freeze({
-  codex: ["--sandbox", "--cd", "--ignore-user-config"],
-  claude: ["--print", "--permission-mode", "--disallowedTools", "--output-format", "--safe-mode"]
+  codex: ["--sandbox", "--cd", "--ignore-user-config", "--output-schema", "--output-last-message"],
+  claude: ["--print", "--permission-mode", "--disallowedTools", "--output-format", "--safe-mode", "--json-schema"]
 });
+
+export const PARTICIPANT_SCHEMA_PATH = fileURLToPath(new URL("../../schemas/participant-output.schema.json", import.meta.url));
+
+// claude --json-schema silently skips structured output when the schema
+// carries a $schema meta key, so strip it before passing the schema inline.
+function participantSchemaInline() {
+  const schema = JSON.parse(fs.readFileSync(PARTICIPANT_SCHEMA_PATH, "utf8"));
+  delete schema.$schema;
+  return JSON.stringify(schema);
+}
 
 const BASE_FAKE_CAPABILITIES = {
   class: "tool-proxy",
@@ -211,7 +223,12 @@ class FakeAdapter {
     if (options.turnDelayMs) {
       await delay(options.turnDelayMs);
     }
-    const scripted = loadFixtureTurn(options.fixture, turnIndex, participant);
+    let scripted = loadFixtureTurn(options.fixture, turnIndex, participant);
+    if (scripted && Array.isArray(scripted.attempts)) {
+      const attempt = Math.min(options.__attempt || 0, scripted.attempts.length - 1);
+      scripted = scripted.attempts[attempt];
+    }
+    if (typeof scripted === "string") return scripted;
     const response = scripted || defaultFakeTurn({ participant, turnIndex, options, transcript });
     if (this.name === "fake-tooling" && /WRITE_VIOLATION/.test(options.topic || "")) {
       return {
@@ -269,7 +286,7 @@ class LocalCliAdapter {
         class: "local-cli",
         file_scope: ["none", "working-tree", "branch"],
         web_scope: ["off"],
-        control_output: ["nonce-block"],
+        control_output: ["json-schema", "nonce-block"],
         read_only_enforcement: this.name === "codex" ? "sandbox-read-only" : "tool-denylist-plan-mode",
         observed_evidence: [],
         timeouts: true
@@ -277,26 +294,77 @@ class LocalCliAdapter {
     };
   }
 
+  controlMode() {
+    return "json-schema";
+  }
+
   async invoke({ participant, options, prompt, nonce }) {
     if (this.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE === "1") {
       return defaultFakeTurn({ participant, turnIndex: options.__turnIndex || 0, options });
     }
     const command = localCliCommandName(this.name, this.env);
-    const args = this.name === "codex"
-      ? ["exec", "--sandbox", "read-only", "--cd", options.cwd, "--ignore-user-config", "-"]
-      : [
-          "--safe-mode",
-          "--print",
-          "--permission-mode",
-          "plan",
-          "--disallowedTools",
-          "Edit,MultiEdit,Write,Bash(git commit *),Bash(git push *),Bash(converge-loop *),Bash(review-loop *)",
-          "--output-format",
-          "text",
-          prompt
-        ];
-    const output = await runWithTimeout(command, args, this.name === "codex" ? prompt : null, options.turnTimeoutSeconds * 1000, this.env);
-    return parseParticipantOutput(output, { nonce, participant });
+    const timeoutMs = options.turnTimeoutSeconds * 1000;
+    if (this.name === "codex") {
+      const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "converge-loop-turn-"));
+      const outPath = path.join(outDir, "last-message.json");
+      try {
+        const stdout = await runWithTimeout(command, [
+          "exec",
+          "--sandbox", "read-only",
+          "--cd", options.cwd,
+          "--ignore-user-config",
+          "--output-schema", PARTICIPANT_SCHEMA_PATH,
+          "--output-last-message", outPath,
+          "-"
+        ], prompt, timeoutMs, this.env);
+        const structured = readStructuredFile(outPath);
+        if (structured) return structured;
+        return parseParticipantOutput(stdout, { nonce, participant });
+      } finally {
+        fs.rmSync(outDir, { recursive: true, force: true });
+      }
+    }
+    const stdout = await runWithTimeout(command, [
+      "--safe-mode",
+      "--print",
+      "--permission-mode",
+      "plan",
+      "--disallowedTools",
+      "Edit,MultiEdit,Write,Bash(git commit *),Bash(git push *),Bash(converge-loop *),Bash(review-loop *)",
+      "--output-format",
+      "json",
+      "--json-schema",
+      participantSchemaInline()
+    ], prompt, timeoutMs, this.env);
+    const envelope = tryParseJson(stdout);
+    if (envelope && typeof envelope === "object" && ("is_error" in envelope || "structured_output" in envelope || "result" in envelope)) {
+      if (envelope.is_error) {
+        throw new Error(`claude reported an error: ${envelope.result || envelope.subtype || "unknown"}`);
+      }
+      if (envelope.structured_output) {
+        return envelope.structured_output;
+      }
+      return parseParticipantOutput(String(envelope.result || ""), { nonce, participant });
+    }
+    return parseParticipantOutput(stdout, { nonce, participant });
+  }
+}
+
+function readStructuredFile(outPath) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(outPath, "utf8"));
+    if (parsed && typeof parsed === "object" && parsed.control) return parsed;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function tryParseJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
   }
 }
 
@@ -502,6 +570,8 @@ function runWithTimeout(command, args, stdin, timeoutMs, env = process.env) {
     let stderr = "";
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
+      const killTimer = setTimeout(() => child.kill("SIGKILL"), 2000);
+      killTimer.unref();
       reject(new Error(`${command} timed out after ${timeoutMs}ms`));
     }, timeoutMs);
     child.stdout.on("data", (chunk) => { stdout += chunk; });

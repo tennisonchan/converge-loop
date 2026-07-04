@@ -6,6 +6,7 @@ export function defaultControl(overrides = {}) {
     confidence: "medium",
     agreements: [],
     pushbacks: [],
+    minor_reservations: [],
     improvements: [],
     open_questions: [],
     evidence_used: [],
@@ -23,6 +24,7 @@ export function normalizeControl(control = {}) {
   for (const key of [
     "agreements",
     "pushbacks",
+    "minor_reservations",
     "improvements",
     "open_questions",
     "evidence_used",
@@ -36,15 +38,31 @@ export function normalizeControl(control = {}) {
     normalized.status = "continue";
   }
   normalized.ready_to_converge = Boolean(normalized.ready_to_converge);
+  if (normalized.status === "agreed") {
+    normalized.ready_to_converge = true;
+  }
   return normalized;
+}
+
+// Participant-level convergence on the core issue: ready with no core
+// pushbacks or pending evidence. Minor reservations do not block.
+export function isConverged(control) {
+  const c = normalizeControl(control);
+  return Boolean(
+    c.ready_to_converge &&
+    !c.pushbacks.length &&
+    !c.evidence_requests.length &&
+    !c.operator_intervention_points.length
+  );
 }
 
 export function parseParticipantOutput(output, { nonce } = {}) {
   if (output && typeof output === "object" && !Buffer.isBuffer(output)) {
-    const control = output.control || (output.status || typeof output.ready_to_converge === "boolean" ? output : {});
+    const control = output.control || (output.status || typeof output.ready_to_converge === "boolean" ? output : null);
     return {
       message: String(output.message || output.notes || ""),
-      control: normalizeControl(stripNonControlFields(control)),
+      control: normalizeControl(stripNonControlFields(control || {})),
+      control_found: Boolean(control),
       evidence: Array.isArray(output.evidence) ? output.evidence : []
     };
   }
@@ -66,6 +84,7 @@ export function parseParticipantOutput(output, { nonce } = {}) {
         return {
           message: text.replace(pattern, "").trim(),
           control: normalizeControl(control),
+          control_found: true,
           evidence: []
         };
       }
@@ -76,6 +95,7 @@ export function parseParticipantOutput(output, { nonce } = {}) {
   return {
     message: text.trim(),
     control: normalizeControl(),
+    control_found: false,
     evidence: []
   };
 }
@@ -94,6 +114,7 @@ function parseNonceJsonFallback(text, nonce) {
   return {
     message: text.replace(last.full, "").trim(),
     control: normalizeControl(stripNonControlFields(last.parsed)),
+    control_found: true,
     evidence: []
   };
 }
@@ -110,6 +131,7 @@ export function hasProgress(control) {
     c.ready_to_converge ||
     c.agreements.length ||
     c.pushbacks.length ||
+    c.minor_reservations.length ||
     c.improvements.length ||
     c.open_questions.length ||
     c.evidence_used.length ||
@@ -117,6 +139,40 @@ export function hasProgress(control) {
     c.concessions.length ||
     c.operator_intervention_points.length
   );
+}
+
+const PROGRESS_LIST_KEYS = [
+  "agreements",
+  "pushbacks",
+  "minor_reservations",
+  "improvements",
+  "open_questions",
+  "evidence_used",
+  "evidence_requests",
+  "concessions",
+  "operator_intervention_points"
+];
+
+// Withdrawing one of these without adding anything is still movement
+// toward (or away from) convergence.
+const DEESCALATION_KEYS = ["pushbacks", "evidence_requests", "operator_intervention_points"];
+
+// A turn makes progress only relative to the same participant's previous
+// control: restating the same positions verbatim is not movement.
+export function hasNewProgress(control, previousControl = null) {
+  const c = normalizeControl(control);
+  if (!previousControl) return hasProgress(c);
+  const previous = normalizeControl(previousControl);
+  if (c.status !== previous.status) return true;
+  if (c.ready_to_converge !== previous.ready_to_converge) return true;
+  if (PROGRESS_LIST_KEYS.some((key) => {
+    const seen = new Set(previous[key]);
+    return c[key].some((item) => !seen.has(item));
+  })) return true;
+  return DEESCALATION_KEYS.some((key) => {
+    const kept = new Set(c[key]);
+    return previous[key].some((item) => !kept.has(item));
+  });
 }
 
 export function hasMaterialPushback(control) {

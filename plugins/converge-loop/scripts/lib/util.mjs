@@ -27,7 +27,9 @@ export function readJson(file) {
 
 export function writeJson(file, value) {
   ensureDir(path.dirname(file));
-  fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`);
+  fs.renameSync(tmp, file);
 }
 
 export function appendJsonl(file, value) {
