@@ -327,7 +327,12 @@ function buildTurnPrompt({ options, participant, transcript, nonce }) {
     `You are ${participant.role} in a converge-loop deliberation.`,
     `Topic: ${options.topic || "(none)"}`,
     options.focus ? `Focus: ${options.focus}` : "",
-    `Return natural discussion plus a final control block for nonce ${nonce}.`,
+    `Return natural discussion plus one final nonce-delimited control block exactly in this delimiter form.`,
+    `The JSON field values below are a template; replace them with values that reflect your actual turn:`,
+    `<<<CONVERGE_LOOP_CONTROL ${nonce}>>>`,
+    `{"status":"continue","confidence":"medium","agreements":[],"pushbacks":[],"improvements":[],"open_questions":[],"evidence_used":[],"evidence_requests":[],"concessions":[],"ready_to_converge":false,"operator_intervention_points":[],"next_prompt_suggestion":""}`,
+    `<<<END_CONVERGE_LOOP_CONTROL ${nonce}>>>`,
+    `Do not put any other JSON object after that control block.`,
     `Prior turns: ${transcript.length}`
   ].filter(Boolean).join("\n");
 }
