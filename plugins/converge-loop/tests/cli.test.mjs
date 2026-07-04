@@ -58,8 +58,8 @@ function writeLocalCliPair(dir, overrides = {}) {
   fs.mkdirSync(dir, { recursive: true });
   const codex = path.join(dir, "codex");
   const claude = path.join(dir, "claude");
-  const codexHelp = overrides.codexHelp || "Usage: codex exec --sandbox --cd --ignore-user-config --output-schema --output-last-message";
-  const claudeHelp = overrides.claudeHelp || "Usage: claude --print --permission-mode --disallowedTools --output-format --safe-mode --json-schema";
+  const codexHelp = overrides.codexHelp || "Usage: codex exec --sandbox --cd --ignore-user-config --output-schema --output-last-message --model";
+  const claudeHelp = overrides.claudeHelp || "Usage: claude --print --permission-mode --disallowedTools --output-format --safe-mode --json-schema --model --verbose --include-partial-messages";
   const codexAuth = overrides.codexAuth ?? "Logged in using ChatGPT\n";
   const claudeAuth = overrides.claudeAuth ?? "{\"loggedIn\":true,\"authMethod\":\"oauth\"}\n";
   const codexAuthExit = overrides.codexAuthExit ?? 0;
@@ -81,8 +81,10 @@ if (args[0] === "exec") {
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", (chunk) => { input += chunk; });
   process.stdin.on("end", () => {
+    const modelIndex = args.indexOf("--model");
+    const model = modelIndex === -1 ? "default" : args[modelIndex + 1];
     const structured = {
-      message: "codex smoke ok",
+      message: "codex smoke ok model=" + model,
       control: {
         status: "agreed",
         confidence: "high",
@@ -117,8 +119,10 @@ let input = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { input += chunk; });
 process.stdin.on("end", () => {
+  const modelIndex = args.indexOf("--model");
+  const model = modelIndex === -1 ? "default" : args[modelIndex + 1];
   const structured = {
-    message: "claude smoke ok",
+    message: "claude smoke ok model=" + model,
     control: {
       status: "agreed",
       confidence: "high",
@@ -127,11 +131,20 @@ process.stdin.on("end", () => {
     }
   };
   if (args.includes("--json-schema")) {
-    process.stdout.write(JSON.stringify({
+    const envelope = JSON.stringify({
+      type: "result",
       is_error: false,
       result: "claude smoke ok",
       structured_output: structured
-    }) + "\\n");
+    });
+    if (args.includes("stream-json")) {
+      // Mirror real stream-json output: event lines first, result envelope last.
+      process.stdout.write(JSON.stringify({ type: "system", subtype: "init" }) + "\\n");
+      process.stdout.write(JSON.stringify({ type: "stream_event", event: { type: "content_block_delta" } }) + "\\n");
+      process.stdout.write(envelope + "\\n");
+      return;
+    }
+    process.stdout.write(envelope + "\\n");
     return;
   }
   const nonce = /<<<CONVERGE_LOOP_CONTROL ([a-f0-9]+)>>>/i.exec(input)?.[1] || "missing";
@@ -783,7 +796,9 @@ test("stalled adapter turn records adapter failure instead of remaining running"
         attempts: [
           "critic first attempt has no control block",
           {
-            delay_ms: 1500,
+            // Longer than the extended (2x) retry window too, so the turn
+            // exhausts both the primary and the retry attempt.
+            delay_ms: 2500,
             message: "critic repair would eventually respond",
             control: { status: "agreed", agreements: ["too late"], ready_to_converge: true }
           }
@@ -803,7 +818,7 @@ test("stalled adapter turn records adapter failure instead of remaining running"
   assert.equal(result.code, 0, result.stderr);
   const parsed = JSON.parse(result.stdout);
   assert.equal(parsed.status, "blocked");
-  assert.match(parsed.summary, /^Adapter failure: fake-sequence participant turn timed out after 1000ms/);
+  assert.match(parsed.summary, /^Adapter failure: fake-sequence participant turn timed out after 2000ms/);
 
   const sessionId = findSingleSessionId(stateRoot);
   const session = JSON.parse(fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "session.json"), "utf8"));
@@ -814,7 +829,105 @@ test("stalled adapter turn records adapter failure instead of remaining running"
   assert.equal(turns[0].message, "proposer completed");
   assert.equal(turns[0].violation, null);
   assert.equal(turns[1].violation.type, "adapter_failure");
-  assert.match(turns[1].message, /Adapter failed: fake-sequence participant turn timed out after 1000ms/);
+  assert.match(turns[1].message, /Adapter failed: fake-sequence participant turn timed out after 2000ms/);
+  const transcript = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "transcript.md"), "utf8");
+  assert.match(transcript, /retrying once with extended limits \(timeout 2s/);
+});
+
+test("a timed-out turn is retried once with an extended window and can succeed", async () => {
+  const stateRoot = tempRoot("timeout-retry");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      {
+        // Slower than the 1s primary window, faster than the 2s retry window.
+        delay_ms: 1500,
+        message: "slow but real proposer turn",
+        control: { status: "agreed", agreements: ["slow start"], ready_to_converge: true }
+      },
+      { message: "confirmed", control: { status: "agreed", agreements: ["confirmed"], ready_to_converge: true } }
+    ]
+  });
+  const result = await cliFakes("fake-replay,fake-replay", [
+    "--topic", "timeout retry",
+    "--fixture", fixture,
+    "--turn-timeout-seconds", "1",
+    "--json"
+  ], stateRoot);
+  assert.equal(result.code, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.status, "agreed");
+  const sessionId = findSingleSessionId(stateRoot);
+  const turns = readTurns(stateRoot, sessionId);
+  assert.equal(turns[0].message, "slow but real proposer turn");
+  assert.equal(turns[0].violation, null);
+  const transcript = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "transcript.md"), "utf8");
+  assert.match(transcript, /timed out after 1000ms.*retrying once with extended limits \(timeout 2s/);
+});
+
+test("per-adapter models flow from run flags and local-adapters config to the CLIs", async () => {
+  const stateRoot = tempRoot("adapter-models");
+  const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"));
+  const setupHarness = io(stateRoot);
+  setupHarness.env.PATH = `${binDir}${path.delimiter}${setupHarness.env.PATH || ""}`;
+  delete setupHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
+  const setupCode = await runCli(["setup", "--json"], setupHarness);
+  assert.equal(setupCode, 0, setupHarness.err.join(""));
+  const configPath = JSON.parse(setupHarness.out.join("")).config_path;
+  // Operator-maintained persistent model default for claude.
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  config.adapters = { claude: { model: "sonnet-config" } };
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+
+  const runHarness = io(stateRoot);
+  runHarness.env.PATH = setupHarness.env.PATH;
+  delete runHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
+  delete runHarness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS;
+  runHarness.env.CONVERGE_LOOP_HOST = "codex";
+  const runCode = await runCli([
+    "run",
+    "--topic", "model plumbing",
+    "--scope", "none",
+    "--codex-model", "gpt-flag",
+    "--json"
+  ], runHarness);
+  assert.equal(runCode, 0, runHarness.err.join(""));
+  const parsed = JSON.parse(runHarness.out.join(""));
+  assert.equal(parsed.status, "agreed");
+  const sessionId = findSingleSessionId(stateRoot);
+  const turns = readTurns(stateRoot, sessionId);
+  const byAdapter = Object.fromEntries(turns.map((turn) => [turn.adapter, turn.message]));
+  assert.equal(byAdapter.codex, "codex smoke ok model=gpt-flag");
+  assert.equal(byAdapter.claude, "claude smoke ok model=sonnet-config");
+});
+
+test("setup reruns preserve the operator-maintained adapters config block", async () => {
+  const stateRoot = tempRoot("setup-preserve-adapters");
+  const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"));
+  const harness = io(stateRoot);
+  harness.env.PATH = `${binDir}${path.delimiter}${harness.env.PATH || ""}`;
+  delete harness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
+  const firstCode = await runCli(["setup", "--json"], harness);
+  assert.equal(firstCode, 0, harness.err.join(""));
+  const configPath = JSON.parse(harness.out.join("")).config_path;
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  config.adapters = { claude: { model: "sonnet-config" }, codex: { model: "gpt-config" } };
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+
+  const rerunHarness = io(stateRoot);
+  rerunHarness.env.PATH = harness.env.PATH;
+  delete rerunHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
+  const rerunCode = await runCli(["setup", "--json"], rerunHarness);
+  assert.equal(rerunCode, 0, rerunHarness.err.join(""));
+  const rewritten = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  assert.deepEqual(rewritten.adapters, { claude: { model: "sonnet-config" }, codex: { model: "gpt-config" } });
+
+  const disableHarness = io(stateRoot);
+  disableHarness.env.PATH = harness.env.PATH;
+  const disableCode = await runCli(["setup", "--disable", "--json"], disableHarness);
+  assert.equal(disableCode, 0, disableHarness.err.join(""));
+  const disabled = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  assert.equal(disabled.enabled, false);
+  assert.deepEqual(disabled.adapters, { claude: { model: "sonnet-config" }, codex: { model: "gpt-config" } });
 });
 
 test("result export requires explicit versioned export when destination is tracked-visible", async () => {
@@ -1266,7 +1379,8 @@ test("per-attempt timeout blocks with adapter_failure reason and the session is 
   const stateRoot = tempRoot("attempt-timeout");
   const blocked = await cliFakes("fake-sequence,fake-sequence", [
     "--topic", "attempt timeout",
-    "--turn-delay-ms", "1500",
+    // Exceeds both the 1s primary window and the 2s extended retry window.
+    "--turn-delay-ms", "2500",
     "--turn-timeout-seconds", "1",
     "--json"
   ], stateRoot);
@@ -1307,6 +1421,30 @@ test("interrupted foreground sessions stuck in running state can be resumed", as
   const resumed = await cli(["resume", sessionId, "--json"], stateRoot);
   assert.equal(resumed.code, 0, resumed.stderr);
   assert.equal(readResult(stateRoot, sessionId).status, "agreed");
+});
+
+test("resume refuses a heartbeat-stale session whose process is still alive", async () => {
+  const stateRoot = tempRoot("stale-alive-refuse");
+  const fixture = writeFixture(stateRoot, {
+    turns: [{ message: "need logs", control: { status: "needs_evidence", evidence_requests: ["logs"] } }]
+  });
+  const run = await cliFakes("fake-replay,fake-replay", [
+    "--topic", "stale alive",
+    "--fixture", fixture,
+    "--json"
+  ], stateRoot);
+  assert.equal(JSON.parse(run.stdout).status, "needs_evidence");
+  const sessionId = findSingleSessionId(stateRoot);
+  const jobPath = path.join(stateRoot, "jobs", `${sessionId}.json`);
+  const job = JSON.parse(fs.readFileSync(jobPath, "utf8"));
+  job.status = "running";
+  job.pid = process.pid;
+  job.turn_timeout_seconds = 1;
+  job.last_heartbeat_at = new Date(Date.now() - 60_000).toISOString();
+  fs.writeFileSync(jobPath, JSON.stringify(job, null, 2));
+  const resumed = await cli(["resume", sessionId, "--fixture", fixture, "--json"], stateRoot);
+  assert.equal(resumed.code, 1);
+  assert.match(resumed.stderr, /stale by heartbeat but its process .* is still running/);
 });
 
 test("resume is refused while a foreground session is genuinely live", async () => {

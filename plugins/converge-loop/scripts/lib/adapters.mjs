@@ -9,8 +9,8 @@ import { commandExists, defaultStateRoot, nowIso, readJson, redact, signalProces
 const LOCAL_ADAPTER_CONFIG_SCHEMA = "converge-loop.local-adapters.v1";
 // Keep this in sync with LocalCliAdapter.invoke; setup and runtime preflight assert these flags.
 export const LOCAL_CLI_REQUIRED_FLAGS = Object.freeze({
-  codex: ["--sandbox", "--cd", "--ignore-user-config", "--output-schema", "--output-last-message"],
-  claude: ["--print", "--permission-mode", "--disallowedTools", "--output-format", "--safe-mode", "--json-schema"]
+  codex: ["--sandbox", "--cd", "--ignore-user-config", "--output-schema", "--output-last-message", "--model"],
+  claude: ["--print", "--permission-mode", "--disallowedTools", "--output-format", "--safe-mode", "--json-schema", "--model", "--verbose", "--include-partial-messages"]
 });
 
 export const PARTICIPANT_SCHEMA_PATH = fileURLToPath(new URL("../../schemas/participant-output.schema.json", import.meta.url));
@@ -117,6 +117,15 @@ export function writeLocalAdapterConfig(env = process.env, payload) {
     schema_version: LOCAL_ADAPTER_CONFIG_SCHEMA,
     ...payload
   });
+}
+
+// Per-adapter model selection: run flag first, then the operator-maintained
+// `adapters.<name>.model` block in local-adapters.json, then the CLI default.
+export function adapterModel(name, options, env = process.env) {
+  const flag = name === "claude" ? options.claudeModel : name === "codex" ? options.codexModel : null;
+  if (flag) return flag;
+  const configured = readLocalAdapterConfig(env)?.adapters?.[name]?.model;
+  return typeof configured === "string" && configured.trim() ? configured.trim() : null;
 }
 
 export function checkLocalCliReadiness(env = process.env) {
@@ -256,6 +265,9 @@ class LocalCliAdapter {
   constructor(name, env) {
     this.name = name;
     this.env = env;
+    // Resolved once per adapter instance so a mid-session edit of
+    // local-adapters.json cannot silently switch models between turns.
+    this.resolvedModel = undefined;
   }
 
   preflight({ options, env }) {
@@ -310,20 +322,29 @@ class LocalCliAdapter {
       return defaultFakeTurn({ participant, turnIndex: options.__turnIndex || 0, options });
     }
     const command = localCliCommandName(this.name, this.env);
-    const timeoutMs = options.turnTimeoutSeconds * 1000;
+    if (this.resolvedModel === undefined) {
+      this.resolvedModel = adapterModel(this.name, options, this.env);
+    }
+    const model = this.resolvedModel;
+    const limits = {
+      timeoutMs: options.turnTimeoutSeconds * 1000,
+      inactivityMs: (options.turnInactivitySeconds ?? 0) * 1000,
+      cwd: options.cwd
+    };
     if (this.name === "codex") {
       const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "converge-loop-turn-"));
       const outPath = path.join(outDir, "last-message.json");
       try {
         const stdout = await runWithTimeout(command, [
           "exec",
+          ...(model ? ["--model", model] : []),
           "--sandbox", "read-only",
           "--cd", options.cwd,
           "--ignore-user-config",
           "--output-schema", PARTICIPANT_SCHEMA_PATH,
           "--output-last-message", outPath,
           "-"
-        ], prompt, timeoutMs, this.env);
+        ], prompt, limits, this.env);
         const structured = readStructuredFile(outPath);
         if (structured) return structured;
         return parseParticipantOutput(stdout, { nonce, participant });
@@ -331,20 +352,26 @@ class LocalCliAdapter {
         fs.rmSync(outDir, { recursive: true, force: true });
       }
     }
+    // stream-json keeps output flowing during long turns so the inactivity
+    // detector can tell a slow model from a hung one; the final stream line is
+    // the same result envelope the buffered json format produces.
     const stdout = await runWithTimeout(command, [
       "--safe-mode",
       "--print",
+      ...(model ? ["--model", model] : []),
       "--permission-mode",
       "plan",
       "--disallowedTools",
       "Edit,MultiEdit,Write,Bash(git commit *),Bash(git push *),Bash(converge-loop *),Bash(review-loop *)",
       "--output-format",
-      "json",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
       "--json-schema",
       participantSchemaInline()
-    ], prompt, timeoutMs, this.env);
-    const envelope = tryParseJson(stdout);
-    if (envelope && typeof envelope === "object" && ("is_error" in envelope || "structured_output" in envelope || "result" in envelope)) {
+    ], prompt, limits, this.env);
+    const envelope = claudeResultEnvelope(stdout);
+    if (envelope) {
       if (envelope.is_error) {
         throw new Error(`claude reported an error: ${redact(envelope.result || envelope.subtype || "unknown")}`);
       }
@@ -355,6 +382,27 @@ class LocalCliAdapter {
     }
     return parseParticipantOutput(stdout, { nonce, participant });
   }
+}
+
+// Accepts both stream-json output (scan for the trailing result event) and a
+// plain result envelope — including a pretty-printed multi-line one — so older
+// CLI builds and wrapper scripts keep working.
+function claudeResultEnvelope(stdout) {
+  const text = String(stdout || "");
+  const lines = text.split(/\n/);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index].trim();
+    if (!line) continue;
+    const parsed = tryParseJson(line);
+    if (!parsed || typeof parsed !== "object") continue;
+    if (parsed.type === "result" || "is_error" in parsed || "structured_output" in parsed) return parsed;
+    if ("result" in parsed && !("type" in parsed)) return parsed;
+  }
+  const whole = tryParseJson(text.trim());
+  if (whole && typeof whole === "object" && ("is_error" in whole || "structured_output" in whole || "result" in whole)) {
+    return whole;
+  }
+  return null;
 }
 
 function readStructuredFile(outPath) {
@@ -567,7 +615,8 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function runWithTimeout(command, args, stdin, timeoutMs, env = process.env) {
+function runWithTimeout(command, args, stdin, limits, env = process.env) {
+  const { timeoutMs, inactivityMs = 0, cwd = undefined } = limits;
   return new Promise((resolve, reject) => {
     // detached gives the child its own process group so timeout kills reach
     // grandchildren the CLI may have spawned; the recursion sentinel stops
@@ -575,26 +624,50 @@ function runWithTimeout(command, args, stdin, timeoutMs, env = process.env) {
     const child = spawn(command, args, {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...env, CONVERGE_LOOP_PARTICIPANT: "1" },
+      cwd,
       detached: true
     });
     let stdout = "";
     let stderr = "";
-    const timer = setTimeout(() => {
+    let inactivityTimer = null;
+    let killed = false;
+    const killWith = (message, timeoutKind) => {
+      if (killed) return;
+      killed = true;
+      clearTimers();
       signalProcessTree(child.pid, "SIGTERM");
       const killTimer = setTimeout(() => signalProcessTree(child.pid, "SIGKILL"), 2000);
       killTimer.unref();
-      const error = new Error(`${command} timed out after ${timeoutMs}ms`);
+      const error = new Error(message);
       error.code = "CONVERGE_LOOP_TIMEOUT";
+      error.timeoutKind = timeoutKind;
       reject(error);
+    };
+    const timer = setTimeout(() => {
+      killWith(`${command} timed out after ${timeoutMs}ms (absolute turn cap; increase --turn-timeout-seconds to allow longer turns)`, "absolute");
     }, timeoutMs);
-    child.stdout.on("data", (chunk) => { stdout += chunk; });
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
-    child.on("error", (error) => {
+    // The inactivity timer resets on every stdout/stderr chunk, so a slow but
+    // streaming turn survives while a genuinely hung CLI dies fast.
+    const armInactivity = () => {
+      if (killed || !inactivityMs) return;
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+      inactivityTimer = setTimeout(() => {
+        killWith(`${command} produced no output for ${inactivityMs}ms and looks hung (adjust --turn-inactivity-seconds; 0 disables)`, "inactivity");
+      }, inactivityMs);
+    };
+    const clearTimers = () => {
       clearTimeout(timer);
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+    };
+    armInactivity();
+    child.stdout.on("data", (chunk) => { stdout += chunk; armInactivity(); });
+    child.stderr.on("data", (chunk) => { stderr += chunk; armInactivity(); });
+    child.on("error", (error) => {
+      clearTimers();
       reject(error);
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
+      clearTimers();
       if (code === 0) resolve(stdout.trim());
       else reject(new Error(`${command} failed with code ${code}: ${redact(stderr.trim())}`));
     });

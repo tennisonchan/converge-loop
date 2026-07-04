@@ -139,7 +139,7 @@ export async function runSession({ store, options, stdout, env, sessionId = null
         session,
         participants,
         status: "timeout",
-        summary: "Session reached the configured wall-clock timeout.",
+        summary: `Session reached the configured wall-clock timeout (${options.maxMinutes} min) after ${turnIndex} turns; resume with \`converge-loop resume ${session.id}\` or raise --max-minutes.`,
         turnCount: turnIndex,
         agreements,
         improvements,
@@ -156,22 +156,33 @@ export async function runSession({ store, options, stdout, env, sessionId = null
     const nonce = randomBytes(6).toString("hex");
     const transcript = store.readTurns(session.id);
     const attemptArgs = { options, participants, transcript, nonce, materials, latestControls, turnIndex };
+    printNote(stdout, options, `turn ${turnIndex + 1} ${participant.role} (${participant.adapter}) thinking (limit ${options.turnTimeoutSeconds}s)…`);
     let parsed = null;
     try {
       parsed = await runTurnAttempts({ ...attemptArgs, adapter, participant });
     } catch (primaryError) {
       let failure = primaryError;
-      if (!isTimeoutError(primaryError)) {
-        // One same-adapter retry for transient failures; timeouts skip it
-        // because a second full timeout window rarely changes the outcome.
+      // One same-adapter retry: transient failures get the same window; a
+      // timeout gets a single extended window (both the absolute cap and the
+      // inactivity window double), because a slow model can eat most of the
+      // first window before producing its reply. No new attempt starts past
+      // the wall-clock deadline — retries must not overshoot --max-minutes.
+      const timeoutScale = isTimeoutError(primaryError) ? 2 : 1;
+      if (Date.now() < deadline) {
+        if (timeoutScale > 1) {
+          const inactivity = (options.turnInactivitySeconds ?? 0) * timeoutScale;
+          const note = `${participant.adapter} turn failed (${redact(primaryError.message)}); retrying once with extended limits (timeout ${options.turnTimeoutSeconds * timeoutScale}s${inactivity ? `, inactivity ${inactivity}s` : ""}).`;
+          printNote(stdout, options, `turn ${turnIndex + 1} ${note}`);
+          store.writeTranscript(session.id, `\n> Turn ${turnIndex + 1}: ${note}\n`);
+        }
         try {
-          parsed = await runTurnAttempts({ ...attemptArgs, adapter, participant });
+          parsed = await runTurnAttempts({ ...attemptArgs, adapter, participant, timeoutScale });
           failure = null;
         } catch (retryError) {
           failure = retryError;
         }
       }
-      if (failure) {
+      if (failure && Date.now() < deadline) {
         const swap = maybeSwapParticipant({ participant, options, env });
         if (swap) {
           participants[turnIndex % participants.length] = swap.participant;
@@ -417,18 +428,20 @@ function buildResult({
   };
 }
 
-async function runTurnAttempts({ adapter, participant, participants, options, transcript, nonce, materials, latestControls, turnIndex }) {
+async function runTurnAttempts({ adapter, participant, participants, options, transcript, nonce, materials, latestControls, turnIndex, timeoutScale = 1 }) {
   const controlMode = typeof adapter.controlMode === "function" ? adapter.controlMode() : "nonce-block";
   const prompt = buildTurnPrompt({ options, participant, participants, transcript, nonce, controlMode, materials, latestControls });
   const maxAttempts = 1 + Math.max(0, options.maxControlRetries ?? 1);
-  const timeoutMs = options.turnTimeoutSeconds * 1000;
+  const turnTimeoutSeconds = options.turnTimeoutSeconds * timeoutScale;
+  const turnInactivitySeconds = (options.turnInactivitySeconds ?? 0) * timeoutScale;
+  const timeoutMs = turnTimeoutSeconds * 1000;
   let parsed = null;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const attemptPrompt = attempt === 0 ? prompt : buildRepairPrompt(prompt, nonce, controlMode);
     const raw = await invokeWithTimeout(adapter, {
       participant,
       turnIndex,
-      options: { ...options, __turnIndex: turnIndex, __attempt: attempt },
+      options: { ...options, turnTimeoutSeconds, turnInactivitySeconds, __turnIndex: turnIndex, __attempt: attempt },
       transcript,
       prompt: attemptPrompt,
       nonce
@@ -453,7 +466,7 @@ function invokeWithTimeout(adapter, payload, timeoutMs) {
   let timer = null;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => {
-      const error = new Error(`${payload.participant.adapter} participant turn timed out after ${timeoutMs}ms`);
+      const error = new Error(`${payload.participant.adapter} participant turn timed out after ${timeoutMs}ms (increase --turn-timeout-seconds to allow longer turns, or configure a faster model in local-adapters.json)`);
       error.code = "CONVERGE_LOOP_TIMEOUT";
       reject(error);
     }, timeoutMs);

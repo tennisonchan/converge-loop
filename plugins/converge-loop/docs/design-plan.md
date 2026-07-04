@@ -107,7 +107,9 @@ Useful `run` options:
 - `--intervene`: allow the orchestrator to pause and ask the operator for input.
 - `--max-turns <n>`: cap dialogue turns.
 - `--max-minutes <n>`: cap wall-clock runtime.
-- `--turn-timeout-seconds <n>`: cap a single participant turn.
+- `--turn-timeout-seconds <n>`: absolute cap for a single participant turn.
+- `--turn-inactivity-seconds <n>`: kill a local CLI turn that produces no output for `n` seconds (0 disables); distinguishes a hung adapter from a slow model. Doubles alongside the absolute cap on the extended timeout retry.
+- `--claude-model <model>` / `--codex-model <model>`: per-run model override for a local CLI participant; persistent defaults live in `local-adapters.json` under `adapters.<name>.model`.
 - `--max-tool-calls-per-turn <n>`: cap direct repo reads/searches per turn.
 - `--max-control-retries <n>`: cap control-output repair attempts.
 - `--json`: return machine-readable session status.
@@ -163,7 +165,7 @@ The default agent order is primary host first, opposite agent second. That means
 
 Fallback applies only to the implicit default opposite-agent path. If an operator supplies `--counterpart` or `--fake-adapters`, the orchestrator treats the selection as intentional and does not replace a failed participant with a fallback.
 
-Fallback is enforced at two points. Preflight fallback replaces an unavailable secondary participant before any turns run. Invoke-time fallback handles mid-session adapter failure: a failed turn is retried once on the same adapter (skipped for timeouts), then the failed slot is swapped to the opposite local CLI when it passes preflight, disclosed as degraded coverage in the transcript and result, and only when no swap is possible does the session end `blocked` with `blocked_reason: "adapter_failure"`. Adapter-failure blocked sessions are resumable once adapters are healthy again. Each swapped participant carries `tier: "fallback"` and `fallback_for`, and a slot never swaps twice.
+Fallback is enforced at two points. Preflight fallback replaces an unavailable secondary participant before any turns run. Invoke-time fallback handles mid-session adapter failure: a failed turn is retried once on the same adapter (with a doubled window when the failure was a timeout), then the failed slot is swapped to the opposite local CLI when it passes preflight, disclosed as degraded coverage in the transcript and result, and only when no swap is possible does the session end `blocked` with `blocked_reason: "adapter_failure"`. Adapter-failure blocked sessions are resumable once adapters are healthy again. Each swapped participant carries `tier: "fallback"` and `fallback_for`, and a slot never swaps twice.
 
 Real local CLI adapters are enabled through `converge-loop setup`, not by asking normal users to set local-adapter environment variables. Setup verifies the local `codex` and `claude` executables, required read-only flag availability, and non-model auth status, then writes a readiness config in the converge-loop state directory. Runtime preflight remains fail-closed when setup has not verified the local controls/auth status or when the installed CLIs no longer satisfy the same flag checks.
 
@@ -315,12 +317,15 @@ The orchestrator, not the participants, adjudicates materiality for stopping. A 
 Default limits:
 
 - `--max-turns 8`
-- `--max-minutes 15`
-- `--turn-timeout-seconds 180`
+- `--max-minutes 30`
+- `--turn-timeout-seconds 420`
+- `--turn-inactivity-seconds 120`
 - `--max-tool-calls-per-turn 20`
 - `--max-control-retries 1`
 
-Every invoke attempt is additionally bounded by an orchestrator-level timeout of `--turn-timeout-seconds`, independent of any timeout the adapter enforces internally, so a hung adapter cannot stall the loop. Adapter error text is redacted for common secret shapes before it is persisted to results or transcripts.
+The turn timeout is an absolute hang bound, not an expected turn length: deliberation turns on large models routinely run past 3 minutes of pure generation, so hung-adapter detection is primarily the inactivity bound. Local CLI participants stream their output (Claude via `--output-format stream-json --include-partial-messages`; Codex via its progressive exec output), and a turn is killed early only when the CLI produces no output at all for the inactivity window. The inactivity default is generous because a legitimate read-only tool call emits nothing until it returns.
+
+Every invoke attempt is additionally bounded by an orchestrator-level timeout of `--turn-timeout-seconds`, independent of any timeout the adapter enforces internally, so a hung adapter cannot stall the loop. A turn that hits either the absolute cap or the inactivity bound is retried once on the same adapter with both windows doubled (a slow model is not a broken adapter) before invoke-time fallback applies. No retry or fallback attempt starts after the `--max-minutes` deadline has passed, which bounds wall-clock overshoot to at most the attempt already in flight. Adapter error text is redacted for common secret shapes before it is persisted to results or transcripts.
 
 Progress is measured against the same participant's previous control: a turn counts as progress only when it adds a new pushback, minor reservation, improvement, evidence citation, evidence request, concession, answered question, status change, or readiness change relative to that participant's prior turn. Restating the same positions verbatim is not movement, and a full round without new movement stops the loop.
 
@@ -337,7 +342,7 @@ Foreground and background runs use the same session directory format. Background
 
 `converge-loop run --background` starts a detached Node child process with the same environment needed for provider credentials, writes the job record, prints the session id, and returns after the child records `session.json`. The child updates a heartbeat at least once per turn and on terminal state.
 
-`converge-loop status` lists recent sessions and jobs, marking a job `stale` when the pid no longer exists or the heartbeat is older than two turn-timeout windows. `converge-loop status <session-id>` reports one session and includes stale/orphan diagnostics.
+`converge-loop status` lists recent sessions and jobs, marking a job `stale` when the pid no longer exists or the heartbeat is older than nine turn-timeout windows (heartbeats land once per completed turn, and one turn may legitimately span up to ~8 windows across primary control attempts, doubled timeout-retry attempts, and fallback-swap attempts). `converge-loop resume` refuses a heartbeat-stale session whose process is still alive, so a slow turn can never be resumed into two concurrent orchestrators. `converge-loop status <session-id>` reports one session and includes stale/orphan diagnostics.
 
 `converge-loop cancel <session-id>` sends a graceful signal to the background child, waits for it to persist `result.json` with status `canceled`, and escalates only if the process ignores the graceful signal. A canceled run keeps all completed turns and records that no conclusion was reached.
 
