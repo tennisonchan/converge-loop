@@ -547,7 +547,7 @@ test("claude command surface is discoverable as a single command", () => {
   const commandPath = path.join(commandDir, "converge-loop.md");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   assert.equal(manifest.name, "converge-loop");
-  assert.equal(manifest.version, "0.1.0");
+  assert.equal(manifest.version, "0.1.1");
   assert.equal(typeof manifest.description, "string");
   assert.equal(manifest.author?.name, "Tennison Chan");
   assert.deepEqual(fs.readdirSync(commandDir), ["converge-loop.md"]);
