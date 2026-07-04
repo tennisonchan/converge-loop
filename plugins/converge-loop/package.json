@@ -1,7 +1,7 @@
 {
   "name": "converge-loop",
   "version": "0.1.0",
-  "description": "Run multi-agent deliberation loops that debate, negotiate, and converge on stronger plans.",
+  "description": "Run multi-agent deliberation loops that debate, negotiate, and converge on any decision, design, or artifact.",
   "type": "module",
   "bin": {
     "converge-loop": "./scripts/bin/converge-loop.mjs"

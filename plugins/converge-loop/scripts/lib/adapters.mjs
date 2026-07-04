@@ -518,11 +518,11 @@ function defaultFakeTurn({ participant, turnIndex, options }) {
   const topic = options.topic || options.focus || "the requested topic";
   if (turnIndex === 0) {
     return {
-      message: `${participant.role} proposes a stronger plan for ${topic}.`,
+      message: `${participant.role} proposes a stronger position on ${topic}.`,
       control: {
         status: "continue",
         confidence: "medium",
-        improvements: [`Clarify the plan for ${topic}`],
+        improvements: [`Clarify the proposal for ${topic}`],
         evidence_used: [],
         ready_to_converge: false
       },
@@ -534,7 +534,7 @@ function defaultFakeTurn({ participant, turnIndex, options }) {
     control: {
       status: "agreed",
       confidence: "high",
-      agreements: [`The plan is sufficient for ${topic}`],
+      agreements: [`The conclusion is sufficient for ${topic}`],
       pushbacks: [],
       improvements: [],
       evidence_used: [],
