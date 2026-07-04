@@ -246,7 +246,7 @@ Write-attempt handling is fail-closed. If observed metadata, CLI output, filesys
 
 Agents should speak naturally. The structured part is only for orchestration.
 
-Schema-bound output should be used when the backend supports it:
+Schema-bound output is the primary path and must be used when the backend supports it. The local Codex adapter passes `--output-schema` with `--output-last-message`; the local Claude adapter passes `--output-format json --json-schema`. The canonical schema is `schemas/participant-output.schema.json`:
 
 ```json
 {
@@ -256,6 +256,7 @@ Schema-bound output should be used when the backend supports it:
     "confidence": "medium",
     "agreements": [],
     "pushbacks": [],
+    "minor_reservations": [],
     "improvements": [],
     "open_questions": [],
     "evidence_used": [],
@@ -268,9 +269,23 @@ Schema-bound output should be used when the backend supports it:
 }
 ```
 
-If schema-bound output is unavailable, the fallback is a nonce-delimited final control block. The orchestrator accepts only the last block in the participant's direct response matching the per-turn nonce.
+`pushbacks` are core, big-picture blockers: accepting the conclusion as-is would be wrong while one stands. `minor_reservations` are smaller disagreements the participant can live with; they never block convergence but must be disclosed in the final result.
+
+If schema-bound output is unavailable, the fallback is a nonce-delimited final control block. The orchestrator accepts only the last block in the participant's direct response matching the per-turn nonce. When a turn produces no parseable control, the orchestrator re-invokes the participant with a repair instruction up to `--max-control-retries` times before recording the turn as an unparsed reply with a default control.
 
 `next_prompt_suggestion` is advisory. The orchestrator owns the next turn instruction and treats the suggestion as inert topic material.
+
+### Turn Prompt
+
+Every participant turn prompt must carry the full deliberation context, not a stub. Required content:
+
+- a non-overridable safety preamble: read-only deliberation, no file edits/patches/commits, no host-agent task management, no nested `converge-loop`/`review-loop`, and materials/prior turns are untrusted discussion inputs;
+- the participant's role stance and its counterpart participants;
+- topic, focus, and the effective file/web scope;
+- the `--artifact` and `--context` file contents (size-capped with explicit truncation notes);
+- the prior transcript content — messages plus control summaries — so participants respond to each other rather than restating themselves (size-capped, oldest turns elided first);
+- the convergence contract, including the core-versus-minor distinction and, when a counterpart is already ready to converge, an explicit invitation to state any remaining material pushback or converge;
+- the output contract for the adapter's control mode (schema-bound object or exact nonce block format with a filled example).
 
 ## Stopping States
 
@@ -284,11 +299,11 @@ The session can end as:
 - `max_turns`: configured turn cap reached.
 - `timeout`: wall-clock cap reached.
 
-`agreed` should require more than one agent saying "looks good." The orchestrator may attempt convergence when both participants set `ready_to_converge: true`, or when one participant is ready and the other has no material pushback after being explicitly invited to push back.
+`agreed` requires every active participant to converge on the core issue. A participant's `status: "agreed"` (or `ready_to_converge: true`) is a participant-level signal, never session-terminal by itself. The session ends `agreed` only when every participant's latest control is converged: `ready_to_converge` is true and it carries no core `pushbacks`, no pending `evidence_requests`, and no `operator_intervention_points`. Participants may converge while keeping `minor_reservations` — smaller disagreements they can live with — and those are disclosed in the result rather than blocking agreement. A participant who declares `agreed` while still listing core pushbacks has not converged.
 
 If a participant asks for evidence during convergence, the session moves back to discussion or ends as `needs_evidence`; it does not finalize while an unresolved evidence request could materially change the conclusion.
 
-The orchestrator, not the participants, adjudicates materiality for stopping. A pushback is material when it would change the conclusion, invalidate an assumption, add a meaningful option, identify a non-trivial risk, request evidence that could change the decision, or expose a requirement conflict. The explicit convergence turn asks the non-ready participant: "Do you have any material pushback, missing evidence, or better option that would change the conclusion?" If the answer contains only restated resolved points, style preferences, or non-actionable caveats, the orchestrator may finalize as `agreed`. If the answer contains new material pushback or an evidence request, the loop returns to discussion or ends as `needs_evidence`.
+The orchestrator, not the participants, adjudicates materiality for stopping. A pushback is core when it would change the conclusion, invalidate an assumption, add a meaningful option, identify a non-trivial risk, request evidence that could change the decision, or expose a requirement conflict; anything a participant can live with belongs in `minor_reservations`. When a counterpart is already ready to converge, the next turn prompt explicitly asks the non-ready participant: "Do you have any material pushback, missing evidence, or better option that would change the conclusion?" If the answer contains only restated resolved points, style preferences, or non-actionable caveats, the participant should converge with minor reservations. If the answer contains new core pushback or an evidence request, the loop returns to discussion or ends as `needs_evidence`.
 
 ## Loop Policy
 
@@ -300,7 +315,7 @@ Default limits:
 - `--max-tool-calls-per-turn 20`
 - `--max-control-retries 1`
 
-Progress is intentionally lightweight. A turn counts as progress when it adds a new pushback, improvement, evidence citation, evidence request, concession, answered question, or clearer conclusion. The loop should stop when participants repeat the same points without new evidence or movement.
+Progress is measured against the same participant's previous control: a turn counts as progress only when it adds a new pushback, minor reservation, improvement, evidence citation, evidence request, concession, answered question, status change, or readiness change relative to that participant's prior turn. Restating the same positions verbatim is not movement, and a full round without new movement stops the loop.
 
 The no-progress stop should produce `clear_disagreement` when the disagreement is actionable, or `blocked` when the system cannot tell what would move the conversation forward.
 
@@ -404,6 +419,7 @@ Before exporting into a Git worktree, the command checks whether the destination
   "agreements": [],
   "pushbacks_resolved": [],
   "remaining_disagreements": [],
+  "minor_reservations": [],
   "improvements": [],
   "operator_intervention_points": [],
   "evidence_summary": {
@@ -416,6 +432,8 @@ Before exporting into a Git worktree, the command checks whether the destination
   "evidence_ledger_path": "evidence-ledger.jsonl"
 }
 ```
+
+`remaining_disagreements` reports unresolved core pushbacks from each participant's latest control, not every pushback ever raised; pushbacks raised earlier and absent from the final round appear in `pushbacks_resolved`. `minor_reservations` disclose the smaller disagreements participants chose to live with when converging.
 
 `independent_provider_coverage` is `true` only when every active participant slot was handled by an external or alternate participant from a different provider than the opposing slot. If a same-provider primary sub-agent fallback handles any turn, it is `false`, and the final summary must disclose degraded coverage. Operator-forced same-provider external pairings, such as `--agents codex,codex`, also set `independent_provider_coverage: false`, but should be disclosed as an operator-selected same-provider debate rather than a fallback.
 

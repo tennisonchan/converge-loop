@@ -236,7 +236,7 @@ export function parseRunArgs(args, io) {
     else if (arg === "--max-minutes") options.maxMinutes = positiveInt("--max-minutes", next());
     else if (arg === "--turn-timeout-seconds") options.turnTimeoutSeconds = positiveInt("--turn-timeout-seconds", next());
     else if (arg === "--max-tool-calls-per-turn") options.maxToolCallsPerTurn = positiveInt("--max-tool-calls-per-turn", next());
-    else if (arg === "--max-control-retries") options.maxControlRetries = positiveInt("--max-control-retries", next());
+    else if (arg === "--max-control-retries") options.maxControlRetries = nonNegativeInt("--max-control-retries", next());
     else if (arg === "--json") options.json = true;
     else if (arg === "--background") options.background = true;
     else if (arg === "--background-child") options.backgroundChild = true;
@@ -528,6 +528,7 @@ function ensureCanceledResult({ store, sessionId, job, env = process.env }) {
     agreements: [],
     pushbacks_resolved: [],
     remaining_disagreements: [],
+    minor_reservations: [],
     improvements: [],
     operator_intervention_points: [],
     evidence_summary: { observed: [], self_reported: [], residual_asymmetry_risk: "low" },
@@ -550,6 +551,14 @@ function positiveInt(name, value) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function nonNegativeInt(name, value) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`${name} must be zero or a positive integer`);
   }
   return parsed;
 }
