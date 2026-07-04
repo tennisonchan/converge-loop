@@ -514,6 +514,17 @@ test("background job records host and cancel-before-init preserves it", async ()
   assert.equal(readResult(stateRoot, sessionId).host_agent, "claude");
 });
 
+test("claude marketplace exposes the plugin from the repository root", () => {
+  const marketplacePath = path.join(repoRoot, "..", "..", ".claude-plugin", "marketplace.json");
+  const marketplace = JSON.parse(fs.readFileSync(marketplacePath, "utf8"));
+  assert.equal(marketplace.name, "converge-loop");
+  assert.equal(marketplace.plugins.length, 1);
+  assert.equal(marketplace.plugins[0].name, "converge-loop");
+  assert.equal(marketplace.plugins[0].source, "./plugins/converge-loop");
+  const codexMarketplace = JSON.parse(fs.readFileSync(path.join(repoRoot, "..", "..", ".agents", "plugins", "marketplace.json"), "utf8"));
+  assert.equal(codexMarketplace.plugins[0].source.path, "./plugins/converge-loop");
+});
+
 test("claude command surface is discoverable as a single command", () => {
   const manifestPath = path.join(repoRoot, ".claude-plugin", "plugin.json");
   const commandDir = path.join(repoRoot, "commands");
