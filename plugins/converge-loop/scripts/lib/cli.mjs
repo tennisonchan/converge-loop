@@ -528,6 +528,9 @@ function parseResumeOverrides(args, io) {
       return args[i];
     };
     if (arg === "--fixture") options.fixture = path.resolve(io.cwd, next());
+    else if (arg === "--context") options.context = resolveReadablePath(io.cwd, next(), "--context");
+    else if (arg === "--artifact") options.artifact = resolveReadablePath(io.cwd, next(), "--artifact");
+    else if (arg === "--focus") options.focus = next();
     else if (arg === "--max-turns") options.maxTurns = positiveInt("--max-turns", next());
     else if (arg === "--max-minutes") options.maxMinutes = positiveInt("--max-minutes", next());
     else if (arg === "--turn-timeout-seconds") options.turnTimeoutSeconds = positiveInt("--turn-timeout-seconds", next());
@@ -679,7 +682,10 @@ function helpText() {
   converge-loop status [session-id]
   converge-loop result <session-id> [--export <path>] [--allow-versioned-export]
   converge-loop cancel <session-id>
-  converge-loop resume <session-id>
+  converge-loop resume <session-id> [--context <path>] [--artifact <path>] [--focus <text>]
+
+Answer a needs_evidence session by resuming with the requested material:
+  converge-loop resume <session-id> --context evidence.md --focus "Requested logs attached"
 
 Run examples:
   converge-loop setup

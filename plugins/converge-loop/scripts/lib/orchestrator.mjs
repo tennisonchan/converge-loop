@@ -32,11 +32,19 @@ export async function runSession({ store, options, stdout, env, sessionId = null
     session = store.loadSession(sessionId);
     store.repairTurnsTail(sessionId);
     const resumedFrom = session.state;
+    const previousOptions = session.options || {};
+    const suppliedMaterials = [];
+    for (const key of ["context", "artifact"]) {
+      if (options[key] && options[key] !== previousOptions[key]) {
+        suppliedMaterials.push(`- New ${key} supplied on resume: ${options[key]}`);
+      }
+    }
     session.state = "running";
-    session.options = { ...session.options, ...options, resumed_from: resumedFrom };
+    session.options = { ...previousOptions, ...options, resumed_from: resumedFrom };
     session.participants = participants;
     store.writeSession(session);
-    store.writeTranscript(session.id, `\n## Resume ${nowIso()}\n\n`);
+    const materialNote = suppliedMaterials.length ? `${suppliedMaterials.join("\n")}\n\n` : "";
+    store.writeTranscript(session.id, `\n## Resume ${nowIso()}\n\n${materialNote}`);
   } else {
     session = store.createSession({
       sessionId: options.sessionId || sessionId || undefined,
