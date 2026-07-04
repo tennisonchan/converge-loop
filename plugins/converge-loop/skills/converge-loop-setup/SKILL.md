@@ -16,7 +16,10 @@ CONVERGE_LOOP_HOST=codex node "<skill-root>/../../scripts/bin/converge-loop.mjs"
 Supported arguments:
 
 - `--json`
+- `--check-only`: run executable, read-only flag, and auth-status checks without writing config or calling models.
+- `--disable`: write disabled local-adapter config.
+- `--smoke`: after normal readiness passes, run a tiny real Codex + Claude adapter exchange before enabling config. This can spend model calls.
 
-Setup only checks local prerequisites and writes converge-loop readiness config when required read-only flags are available. Do not ask Claude Code or Codex to edit files as part of setup.
+Setup checks local prerequisites and writes converge-loop readiness config only when required read-only flags and non-model auth-status checks pass. Do not ask Claude Code or Codex to edit files as part of setup.
 
 After setup succeeds, normal users can run `converge-loop run ...` without setting local-adapter environment variables.

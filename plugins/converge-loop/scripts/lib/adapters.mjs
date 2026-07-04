@@ -5,6 +5,11 @@ import { parseParticipantOutput } from "./control.mjs";
 import { commandExists, defaultStateRoot, nowIso, readJson, writeJson } from "./util.mjs";
 
 const LOCAL_ADAPTER_CONFIG_SCHEMA = "converge-loop.local-adapters.v1";
+// Keep this in sync with LocalCliAdapter.invoke; setup and runtime preflight assert these flags.
+export const LOCAL_CLI_REQUIRED_FLAGS = Object.freeze({
+  codex: ["--sandbox", "--cd", "--ignore-user-config"],
+  claude: ["--print", "--permission-mode", "--disallowedTools", "--output-format", "--safe-mode"]
+});
 
 const BASE_FAKE_CAPABILITIES = {
   class: "tool-proxy",
@@ -99,9 +104,9 @@ export function writeLocalAdapterConfig(env = process.env, payload) {
 
 export function checkLocalCliReadiness(env = process.env) {
   const checks = {
-    node: checkCommand(process.execPath, ["--version"], { requiredText: /^v\d+/ }),
-    codex: checkLocalCliAdapter("codex", env),
-    claude: checkLocalCliAdapter("claude", env)
+    node: checkCommand(process.execPath, ["--version"], { requiredText: /^v\d+/, env }),
+    codex: withAuthCheck("codex", checkLocalCliAdapter("codex", env), env),
+    claude: withAuthCheck("claude", checkLocalCliAdapter("claude", env), env)
   };
   const ok = checks.node.ok && checks.codex.ok && checks.claude.ok;
   return {
@@ -242,20 +247,9 @@ class LocalCliAdapter {
     if (env.CONVERGE_LOOP_ASSUME_LOCAL_CLI_PREFLIGHT === "1") {
       return this.capabilities(options);
     }
-    const command = localCliCommandName(this.name, env);
-    if (!commandExists(command, env)) {
-      return { ok: false, reason: `${command} executable not found` };
-    }
-    const help = spawnSync(command, [this.name === "codex" ? "exec" : "--help", "--help"].filter(Boolean), {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    const text = `${help.stdout || ""}\n${help.stderr || ""}`;
-    if (this.name === "codex" && !text.includes("--sandbox")) {
-      return { ok: false, reason: "codex read-only sandbox flag was not detected" };
-    }
-    if (this.name === "claude" && !text.includes("--disallowedTools")) {
-      return { ok: false, reason: "claude tool-denylist flag was not detected" };
+    const cliCheck = checkLocalCliAdapter(this.name, env);
+    if (!cliCheck.ok) {
+      return { ok: false, reason: cliCheck.reason };
     }
     if (options.web === "shared") {
       return { ok: false, reason: `${this.name} shared web adapter execution is not implemented yet; fake adapters cover deterministic web-scope tests` };
@@ -289,8 +283,9 @@ class LocalCliAdapter {
     }
     const command = localCliCommandName(this.name, this.env);
     const args = this.name === "codex"
-      ? ["exec", "--sandbox", "read-only", "--cd", options.cwd, "-"]
+      ? ["exec", "--sandbox", "read-only", "--cd", options.cwd, "--ignore-user-config", "-"]
       : [
+          "--safe-mode",
           "--print",
           "--permission-mode",
           "plan",
@@ -300,7 +295,7 @@ class LocalCliAdapter {
           "text",
           prompt
         ];
-    const output = await runWithTimeout(command, args, this.name === "codex" ? prompt : null, options.turnTimeoutSeconds * 1000);
+    const output = await runWithTimeout(command, args, this.name === "codex" ? prompt : null, options.turnTimeoutSeconds * 1000, this.env);
     return parseParticipantOutput(output, { nonce, participant });
   }
 }
@@ -312,7 +307,9 @@ function localCliAdaptersEnabled(env) {
     config?.schema_version === LOCAL_ADAPTER_CONFIG_SCHEMA &&
     config.enabled === true &&
     config.checks?.codex?.ok === true &&
-    config.checks?.claude?.ok === true
+    config.checks?.codex?.auth?.ok === true &&
+    config.checks?.claude?.ok === true &&
+    config.checks?.claude?.auth?.ok === true
   );
 }
 
@@ -322,14 +319,17 @@ function checkLocalCliAdapter(name, env) {
     return { ok: false, command, reason: `${command} executable not found` };
   }
   const helpArgs = name === "codex" ? ["exec", "--help"] : ["--help"];
-  const required = name === "codex"
-    ? ["--sandbox", "--cd"]
-    : ["--print", "--permission-mode", "--disallowedTools", "--output-format"];
+  const required = LOCAL_CLI_REQUIRED_FLAGS[name] || [];
   const help = spawnSync(command, helpArgs, {
     encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"]
+    stdio: ["ignore", "pipe", "pipe"],
+    env,
+    timeout: 5000
   });
   const text = `${help.stdout || ""}\n${help.stderr || ""}`;
+  if (help.error) {
+    return { ok: false, command, reason: `${command} help command failed: ${help.error.message}` };
+  }
   if (help.status !== 0) {
     return { ok: false, command, reason: `${command} help command failed`, status: help.status };
   }
@@ -338,6 +338,81 @@ function checkLocalCliAdapter(name, env) {
     return { ok: false, command, reason: `${name} missing required read-only flags: ${missing.join(", ")}` };
   }
   return { ok: true, command, required_flags: required };
+}
+
+function withAuthCheck(name, cliCheck, env) {
+  if (!cliCheck.ok) return { ...cliCheck, auth: { ok: false, reason: "skipped because CLI flag readiness failed" } };
+  const auth = name === "codex"
+    ? checkCodexAuth(cliCheck.command, env)
+    : checkClaudeAuth(cliCheck.command, env);
+  return {
+    ...cliCheck,
+    ok: cliCheck.ok && auth.ok,
+    auth,
+    reason: auth.ok ? cliCheck.reason : auth.reason
+  };
+}
+
+function checkCodexAuth(command, env) {
+  const result = spawnSync(command, ["login", "status"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env,
+    timeout: 5000
+  });
+  const text = `${result.stdout || ""}\n${result.stderr || ""}`.trim();
+  const firstLine = text.split(/\n/).find(Boolean) || "";
+  if (result.error) {
+    return { ok: false, method: "codex-login-status", reason: `codex auth status failed: ${result.error.message}` };
+  }
+  if (result.status !== 0) {
+    return { ok: false, method: "codex-login-status", reason: "codex is not authenticated", status: result.status };
+  }
+  if (isCodexLoggedInOutput(text)) {
+    return { ok: true, method: "codex-login-status", status: "logged-in" };
+  }
+  return {
+    ok: false,
+    method: "codex-login-status",
+    reason: "codex login status output was not recognized as authenticated",
+    output: firstLine
+  };
+}
+
+function isCodexLoggedInOutput(text) {
+  const normalized = String(text || "").trim();
+  if (!normalized) return false;
+  if (/\bnot\s+logged\s+in\b|\blogged\s+out\b|\bunauth/i.test(normalized)) return false;
+  return /^logged in\b/i.test(normalized) || /\blogged in using\b/i.test(normalized);
+}
+
+function checkClaudeAuth(command, env) {
+  const result = spawnSync(command, ["auth", "status", "--json"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    env,
+    timeout: 5000
+  });
+  const text = `${result.stdout || ""}`.trim();
+  if (result.error) {
+    return { ok: false, method: "claude-auth-status-json", reason: `claude auth status failed: ${result.error.message}` };
+  }
+  if (result.status !== 0) {
+    return { ok: false, method: "claude-auth-status-json", reason: "claude is not authenticated", status: result.status };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { ok: false, method: "claude-auth-status-json", reason: "claude auth status did not return valid JSON" };
+  }
+  if (parsed?.loggedIn === true) {
+    const sanitized = { ok: true, method: "claude-auth-status-json", status: "logged-in" };
+    if (parsed.authMethod) sanitized.auth_method = parsed.authMethod;
+    if (parsed.apiProvider) sanitized.api_provider = parsed.apiProvider;
+    return sanitized;
+  }
+  return { ok: false, method: "claude-auth-status-json", reason: "claude auth status is not logged in" };
 }
 
 function localCliCommandName(name, env) {
@@ -417,11 +492,11 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function runWithTimeout(command, args, stdin, timeoutMs) {
+function runWithTimeout(command, args, stdin, timeoutMs, env = process.env) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       stdio: ["pipe", "pipe", "pipe"],
-      env: process.env
+      env
     });
     let stdout = "";
     let stderr = "";
