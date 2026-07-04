@@ -1,0 +1,8 @@
+{
+  "name": "converge-loop",
+  "version": "0.1.0",
+  "description": "Run multi-agent deliberation loops from Claude Code.",
+  "author": {
+    "name": "Tennison Chan"
+  }
+}
