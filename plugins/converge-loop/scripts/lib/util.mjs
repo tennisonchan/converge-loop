@@ -151,6 +151,8 @@ export function redact(text) {
     .replace(/sk-[A-Za-z0-9_-]{16,}/g, "sk-REDACTED")
     .replace(/\b(ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{16,}\b/g, "$1_REDACTED")
     .replace(/\b(AKIA|ASIA)[0-9A-Z]{16}\b/g, "$1REDACTED")
+    .replace(/\b[Bb]earer\s+[A-Za-z0-9._~+/=-]{8,}/g, "Bearer REDACTED")
+    .replace(/\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\b/g, "JWT_REDACTED")
     .replace(/(token|api[_-]?key|authorization)(=|:)\s*["']?[^"'\s]+/gi, "$1$2 REDACTED");
 }
 

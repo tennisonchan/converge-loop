@@ -438,7 +438,7 @@ Before exporting into a Git worktree, the command checks whether the destination
 }
 ```
 
-Blocked results carry `blocked_reason` (`preflight`, `adapter_failure`, `enforcement_violation`, or `no_progress`). Results produced by any fake-tier participant set `fake_coverage: true` and append an explicit fake-coverage disclosure to the summary so test output can never pass as real deliberation. `result.json` is validated against contract invariants before it is written (for example, an `agreed` result cannot carry `remaining_disagreements`), and `turns.jsonl` readers tolerate a torn trailing line from a crash mid-append.
+Blocked results carry `blocked_reason` (`preflight`, `adapter_failure`, `enforcement_violation`, `no_progress`, `participant_declared`, or `unknown`). Results produced by any fake-tier participant set `fake_coverage: true` and append an explicit fake-coverage disclosure to the summary so test output can never pass as real deliberation. `result.json` is validated against contract invariants before it is written (for example, an `agreed` result cannot carry `remaining_disagreements`), and `turns.jsonl` readers tolerate a torn trailing line from a crash mid-append.
 
 `remaining_disagreements` reports unresolved core pushbacks from each participant's latest control, not every pushback ever raised; pushbacks raised earlier and absent from the final round appear in `pushbacks_resolved`. `minor_reservations` disclose the smaller disagreements participants chose to live with when converging.
 

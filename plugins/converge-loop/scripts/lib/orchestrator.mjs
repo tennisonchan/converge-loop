@@ -218,11 +218,9 @@ export async function runSession({ store, options, stdout, env, sessionId = null
     store.writeTranscript(session.id, renderTurn(turn, options.output));
     session.current_turn_index = turnIndex + 1;
     store.writeSession(session);
-    if (options.backgroundChild) {
-      const job = store.loadJob(session.id);
-      if (job) {
-        store.writeJob(session.id, { ...job, status: "running", last_heartbeat_at: nowIso() });
-      }
+    const job = store.loadJob(session.id);
+    if (job) {
+      store.writeJob(session.id, { ...job, status: "running", last_heartbeat_at: nowIso() });
     }
     printTurn(stdout, options, turn);
 
@@ -269,6 +267,7 @@ export async function runSession({ store, options, stdout, env, sessionId = null
         session,
         participants,
         status: control.status,
+        blockedReason: control.status === "blocked" ? "participant_declared" : null,
         summary: terminalSummary(control.status, control, options),
         turnCount: turnIndex + 1,
         agreements,
@@ -435,7 +434,9 @@ function invokeWithTimeout(adapter, payload, timeoutMs) {
   let timer = null;
   const timeout = new Promise((_, reject) => {
     timer = setTimeout(() => {
-      reject(new Error(`${payload.participant.adapter} participant turn timed out after ${timeoutMs}ms`));
+      const error = new Error(`${payload.participant.adapter} participant turn timed out after ${timeoutMs}ms`);
+      error.code = "CONVERGE_LOOP_TIMEOUT";
+      reject(error);
     }, timeoutMs);
   });
   return Promise.race([adapter.invoke(payload), timeout]).finally(() => {
@@ -444,7 +445,7 @@ function invokeWithTimeout(adapter, payload, timeoutMs) {
 }
 
 function isTimeoutError(error) {
-  return /timed out/.test(String(error?.message || ""));
+  return error?.code === "CONVERGE_LOOP_TIMEOUT";
 }
 
 // Invoke-time degraded fallback: when the default opposite-agent pairing

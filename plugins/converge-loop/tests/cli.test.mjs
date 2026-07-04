@@ -1121,6 +1121,90 @@ test("interrupted foreground sessions stuck in running state can be resumed", as
   assert.equal(readResult(stateRoot, sessionId).status, "agreed");
 });
 
+test("resume is refused while a foreground session is genuinely live", async () => {
+  const stateRoot = tempRoot("live-refuse");
+  const run = await cli([
+    "run",
+    "--agents", "fake-sequence,fake-sequence",
+    "--topic", "live refuse",
+    "--json"
+  ], stateRoot);
+  assert.equal(run.code, 0, run.stderr);
+  const sessionId = findSingleSessionId(stateRoot);
+  const sessionPath = path.join(stateRoot, "sessions", sessionId, "session.json");
+  const session = JSON.parse(fs.readFileSync(sessionPath, "utf8"));
+  session.state = "running";
+  fs.writeFileSync(sessionPath, JSON.stringify(session, null, 2));
+  fs.rmSync(path.join(stateRoot, "sessions", sessionId, "result.json"));
+  const jobPath = path.join(stateRoot, "jobs", `${sessionId}.json`);
+  const job = JSON.parse(fs.readFileSync(jobPath, "utf8"));
+  job.status = "running";
+  job.pid = process.pid;
+  job.last_heartbeat_at = new Date().toISOString();
+  fs.writeFileSync(jobPath, JSON.stringify(job, null, 2));
+  const resumed = await cli(["resume", sessionId, "--json"], stateRoot);
+  assert.equal(resumed.code, 1);
+  assert.match(resumed.stderr, /cannot be resumed from status running/);
+});
+
+test("explicit --agents never swaps to a fallback on invoke failure", async () => {
+  const stateRoot = tempRoot("explicit-no-swap");
+  const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"), { codexExecFail: true });
+  const setupHarness = io(stateRoot);
+  setupHarness.env.PATH = `${binDir}${path.delimiter}${setupHarness.env.PATH || ""}`;
+  delete setupHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
+  await runCli(["setup", "--json"], setupHarness);
+
+  const runHarness = io(stateRoot);
+  runHarness.env.PATH = setupHarness.env.PATH;
+  delete runHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
+  delete runHarness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS;
+  const runCode = await runCli(["run", "--agents", "codex,claude", "--topic", "explicit no swap", "--scope", "none", "--json"], runHarness);
+  assert.equal(runCode, 0, runHarness.err.join(""));
+  const parsed = JSON.parse(runHarness.out.join(""));
+  assert.equal(parsed.status, "blocked");
+  assert.equal(parsed.blocked_reason, "adapter_failure");
+  assert.equal(parsed.participants[0].adapter, "codex");
+  assert.deepEqual(parsed.fallbacks_used, []);
+});
+
+test("cancel signals the whole process group when the leader is gone", async () => {
+  const { spawn } = await import("node:child_process");
+  const stateRoot = tempRoot("cancel-tree");
+  // Leader spawns a 60s grandchild in its group, then exits: group-first
+  // probing must still see the session as alive and cancel must kill the group.
+  const leader = spawn(process.execPath, ["-e",
+    "require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 60000)'], { stdio: 'ignore' }).unref();"
+  ], { detached: true, stdio: "ignore" });
+  const leaderPid = leader.pid;
+  await new Promise((resolve) => leader.on("exit", resolve));
+  leader.unref();
+  fs.mkdirSync(path.join(stateRoot, "jobs"), { recursive: true });
+  fs.writeFileSync(path.join(stateRoot, "jobs", "treecancel.json"), JSON.stringify({
+    schema_version: "converge-loop.job.v1",
+    id: "treecancel",
+    pid: leaderPid,
+    command: [],
+    cwd: repoRoot,
+    created_at: new Date().toISOString(),
+    last_heartbeat_at: new Date().toISOString(),
+    status: "running",
+    session_path: path.join(stateRoot, "sessions", "treecancel"),
+    turn_timeout_seconds: 180
+  }));
+  const cancel = await cli(["cancel", "treecancel"], stateRoot);
+  assert.equal(cancel.code, 0, cancel.stderr);
+  assert.match(cancel.stdout, /canceling/);
+  await waitFor(() => {
+    try {
+      process.kill(-leaderPid, 0);
+      return false;
+    } catch {
+      return true;
+    }
+  });
+});
+
 test("status tolerates a torn trailing line in turns.jsonl", async () => {
   const stateRoot = tempRoot("torn");
   await cli([

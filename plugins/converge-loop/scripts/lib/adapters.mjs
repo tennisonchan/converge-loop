@@ -576,7 +576,9 @@ function runWithTimeout(command, args, stdin, timeoutMs, env = process.env) {
       signalProcessTree(child.pid, "SIGTERM");
       const killTimer = setTimeout(() => signalProcessTree(child.pid, "SIGKILL"), 2000);
       killTimer.unref();
-      reject(new Error(`${command} timed out after ${timeoutMs}ms`));
+      const error = new Error(`${command} timed out after ${timeoutMs}ms`);
+      error.code = "CONVERGE_LOOP_TIMEOUT";
+      reject(error);
     }, timeoutMs);
     child.stdout.on("data", (chunk) => { stdout += chunk; });
     child.stderr.on("data", (chunk) => { stderr += chunk; });

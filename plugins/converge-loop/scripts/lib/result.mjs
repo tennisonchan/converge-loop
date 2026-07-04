@@ -1,5 +1,14 @@
 import { RESULT_SCHEMA, TERMINAL_STATUSES } from "./constants.mjs";
 
+const BLOCKED_REASONS = new Set([
+  "preflight",
+  "adapter_failure",
+  "enforcement_violation",
+  "no_progress",
+  "participant_declared",
+  "unknown"
+]);
+
 const RESULT_ARRAY_FIELDS = [
   "participants",
   "fallbacks_used",
@@ -37,6 +46,9 @@ export function validateResult(result) {
   }
   if (result.blocked_reason != null && result.status !== "blocked") {
     throw new Error("blocked_reason is only valid on blocked results");
+  }
+  if (result.status === "blocked" && result.blocked_reason != null && !BLOCKED_REASONS.has(result.blocked_reason)) {
+    throw new Error(`blocked_reason must be one of: ${[...BLOCKED_REASONS].join(", ")}`);
   }
   return result;
 }

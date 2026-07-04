@@ -106,15 +106,19 @@ export class StateStore {
   readTurns(sessionId) {
     const file = this.sessionFile(sessionId, "turns.jsonl");
     if (!fs.existsSync(file)) return [];
-    // Tolerate a torn line from a crash mid-append instead of failing every
-    // later status/resume/result read.
-    return fs.readFileSync(file, "utf8").split(/\n/).filter(Boolean).flatMap((line) => {
+    // Tolerate a torn trailing line from a crash mid-append; corruption
+    // anywhere else would silently shift turn alternation, so fail loudly.
+    const lines = fs.readFileSync(file, "utf8").split(/\n/).filter(Boolean);
+    const turns = [];
+    for (let index = 0; index < lines.length; index += 1) {
       try {
-        return [JSON.parse(line)];
+        turns.push(JSON.parse(lines[index]));
       } catch {
-        return [];
+        if (index === lines.length - 1) break;
+        throw new Error(`corrupt turn record at line ${index + 1} of ${file}`);
       }
-    });
+    }
+    return turns;
   }
 
   listSessions() {
