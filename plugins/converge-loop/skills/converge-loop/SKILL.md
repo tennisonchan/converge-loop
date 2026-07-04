@@ -42,7 +42,7 @@ Use `converge-loop setup --check-only` for diagnostics without config mutation o
 
 Do not pass fake adapters for normal user-facing deliberation. `fake-sequence`, `fake-replay`, and `fake-tooling` are deterministic verification adapters only; results from them must be described as smoke/test coverage, not independent provider deliberation.
 
-If the real opposite-agent path is not enabled yet and the operator only wants to verify installation, use `--agents fake-sequence,fake-sequence` explicitly and disclose that it is fake-adapter smoke coverage.
+If the real opposite-agent path is not enabled yet and the operator only wants to verify installation, run with `--fake-adapters fake-sequence,fake-sequence` explicitly and disclose that it is fake-adapter smoke coverage; the flag refuses real adapters, so it can never stand in for real deliberation. There is no flag for arbitrary participant lists; the operator surface is the host primary plus `--counterpart codex|claude`.
 
 When helping evolve this plugin:
 

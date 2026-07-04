@@ -101,8 +101,8 @@ Useful `run` options:
 - `--base <ref>`: base ref for branch-scope material.
 - `--web off|shared`: web scope available to both participants; default is `off`.
 - `--focus <text>`: narrow the discussion.
-- `--agents <list>`: override default participant selection; default is host-aware auto-selection.
-- `--roles proposer,critic`: select stance for each participant.
+- `--counterpart codex|claude`: select the counterpart participant; default is the host's opposite agent. There is no flag for arbitrary participant lists; `--fake-adapters <fake-a,fake-b>` exists for deterministic verification only and refuses real adapters.
+- `--roles proposer,critic`: select stance for the primary and secondary participants.
 - `--output compact|verbose|quiet`: terminal display mode; default is `compact`.
 - `--intervene`: allow the orchestrator to pause and ask the operator for input.
 - `--max-turns <n>`: cap dialogue turns.
@@ -137,7 +137,7 @@ The `.codex-plugin/plugin.json` manifest continues to expose `skills` because th
 
 The first implementation slice must create the package metadata, bin wrapper, command parser, and no-provider fake adapter path before any real provider adapter is added. That keeps command wiring testable without live model credentials.
 
-The installed skill should not make fake adapters feel like the normal product path. Fake adapters are for deterministic tests, smoke checks, and fixture-driven development. In normal use, omitting `--agents` means "use the current host and its opposite agent," matching the `review-loop` host/opposite-agent convention.
+The installed skill should not make fake adapters feel like the normal product path. Fake adapters are for deterministic tests, smoke checks, and fixture-driven development. In normal use, running without `--counterpart` means "use the current host and its opposite agent," matching the `review-loop` host/opposite-agent convention.
 
 ## Participants
 
@@ -159,9 +159,9 @@ Default participant selection is host-aware and deterministic:
 
 Host identity must be normalized before participant selection. `akx`, `codex`, and `openai` are Codex-host aliases. `akc`, `claude`, `claude-code`, and `anthropic` are Claude-host aliases. The Codex skill sets `CONVERGE_LOOP_HOST=codex`; the Claude Code command uses `CLAUDE_PLUGIN_ROOT` and lets the runtime infer `claude`. An unset host defaults to the Codex-hosted order for CLI-only use; an explicitly unknown host value fails closed.
 
-The default agent order is primary host first, opposite agent second. That means the operator should usually invoke `converge-loop run ...` without `--agents`. `--agents` is an override for diagnostics, tests, or intentionally non-default pairings, not the standard skill path.
+The default agent order is primary host first, opposite agent second. That means the operator should usually invoke `converge-loop run ...` without `--counterpart`. `--counterpart codex|claude` is the only real-adapter pairing override, mirroring review-loop's `--reviewer`; the `--fake-adapters` pair flag exists for diagnostics and deterministic tests only, refuses real adapters, and is not the standard skill path.
 
-Fallback applies only to the implicit default opposite-agent path. If an operator supplies `--agents`, the orchestrator treats the selection as intentional and does not replace a failed participant with a fallback.
+Fallback applies only to the implicit default opposite-agent path. If an operator supplies `--counterpart` or `--fake-adapters`, the orchestrator treats the selection as intentional and does not replace a failed participant with a fallback.
 
 Fallback is enforced at two points. Preflight fallback replaces an unavailable secondary participant before any turns run. Invoke-time fallback handles mid-session adapter failure: a failed turn is retried once on the same adapter (skipped for timeouts), then the failed slot is swapped to the opposite local CLI when it passes preflight, disclosed as degraded coverage in the transcript and result, and only when no swap is possible does the session end `blocked` with `blocked_reason: "adapter_failure"`. Adapter-failure blocked sessions are resumable once adapters are healthy again. Each swapped participant carries `tier: "fallback"` and `fallback_for`, and a slot never swaps twice.
 
@@ -171,7 +171,7 @@ Real local CLI adapters are enabled through `converge-loop setup`, not by asking
 
 Codex participant invocations include `--ignore-user-config` so nested participant runs do not inherit host-session hooks or plugin config. Authentication still uses `CODEX_HOME`; setup verifies the flag before enabling the local adapter. Claude participant invocations include `--safe-mode` for the same hook-isolation reason while preserving auth, model selection, built-in tools, and permissions.
 
-When `--agents` and `--roles` are both supplied, they bind positionally: `agents[i]` receives `roles[i]`. If `--agents` is supplied without `--roles`, roles default to `proposer,critic` in agent order. If `--roles` is supplied without `--agents`, the host default participant order is used.
+`--roles` binds positionally to the primary and secondary participants: `roles[0]` is the primary's stance, `roles[1]` the secondary's. When `--roles` is omitted, roles default to `proposer,critic` in participant order.
 
 The data model should use participant arrays so future versions can support more than two agents without a schema break, but v1 should focus on two.
 
@@ -445,7 +445,7 @@ Blocked results carry `blocked_reason` (`preflight`, `adapter_failure`, `enforce
 
 `remaining_disagreements` reports unresolved core pushbacks from each participant's latest control, not every pushback ever raised; pushbacks raised earlier and absent from the final round appear in `pushbacks_resolved`. `minor_reservations` disclose the smaller disagreements participants chose to live with when converging.
 
-`independent_provider_coverage` is `true` only when every active participant slot was handled by an external or alternate participant from a different provider than the opposing slot. If a same-provider primary sub-agent fallback handles any turn, it is `false`, and the final summary must disclose degraded coverage. Operator-forced same-provider external pairings, such as `--agents codex,codex`, also set `independent_provider_coverage: false`, but should be disclosed as an operator-selected same-provider debate rather than a fallback.
+`independent_provider_coverage` is `true` only when every active participant slot was handled by an external or alternate participant from a different provider than the opposing slot. If a same-provider primary sub-agent fallback handles any turn, it is `false`, and the final summary must disclose degraded coverage. Operator-forced same-provider external pairings, such as `--counterpart codex` from a Codex host, also set `independent_provider_coverage: false`, but should be disclosed as an operator-selected same-provider debate rather than a fallback.
 
 The host agent may share a provider with one participant. Independence is measured between active participant slots, not between the host and a participant. The host's provider matters only when a primary sub-agent fallback is used, because then coverage is degraded and must be disclosed.
 
@@ -519,7 +519,7 @@ Build the runtime in risk-ordered slices. Each slice should leave the repo in a 
 
 1. Command skeleton and fake loop.
    - Add `package.json`, `scripts/bin/converge-loop.mjs`, CLI parser, `run/status/result/cancel/resume` stubs, state directory resolution, and fake adapter support.
-   - Acceptance: `converge-loop run --agents fake-sequence,fake-sequence --topic ...` executes a two-turn foreground loop, persists session files with schema versions, and `result <id>` prints the normalized result.
+   - Acceptance: `converge-loop run --fake-adapters fake-sequence,fake-sequence --topic ...` executes a two-turn foreground loop, persists session files with schema versions, and `result <id>` prints the normalized result.
 
 2. Control contract and stopping policy.
    - Implement schema-bound control parsing, nonce fallback parsing, retry behavior, progress heuristic, materiality adjudication, convergence attempt, terminal statuses, and compact output.
@@ -531,7 +531,7 @@ Build the runtime in risk-ordered slices. Each slice should leave the repo in a 
 
 4. Real local adapters.
    - Add Codex and Claude local CLI adapters only after their read-only flags, tool-denylist behavior, timeout behavior, control-output support, and host/opposite selection can be proven in preflight.
-   - Acceptance: `converge-loop setup` verifies Codex and Claude local CLI read-only controls plus non-model auth status and enables config-backed local adapters; `--check-only` is non-mutating; `--disable` turns config-backed adapters off; optional `--smoke` proves a tiny explicit Codex + Claude exchange without fallback before enabling config; adapter preflight fails closed when setup has not succeeded or enforcement is unavailable; host aliases normalize correctly; from Codex, default selection pairs Codex with Claude Code; from Claude Code, default selection pairs Claude Code with Codex; background jobs persist normalized `host_agent`; default opposite-agent unavailability can fall back to the host adapter with degraded disclosure; explicit `--agents` does not fallback implicitly; with available adapters, a minimal foreground two-agent run completes using the same file scope.
+   - Acceptance: `converge-loop setup` verifies Codex and Claude local CLI read-only controls plus non-model auth status and enables config-backed local adapters; `--check-only` is non-mutating; `--disable` turns config-backed adapters off; optional `--smoke` proves a tiny explicit Codex + Claude exchange without fallback before enabling config; adapter preflight fails closed when setup has not succeeded or enforcement is unavailable; host aliases normalize correctly; from Codex, default selection pairs Codex with Claude Code; from Claude Code, default selection pairs Claude Code with Codex; background jobs persist normalized `host_agent`; default opposite-agent unavailability can fall back to the host adapter with degraded disclosure; explicit `--counterpart`/`--fake-adapters` selections do not fallback implicitly; with available adapters, a minimal foreground two-agent run completes using the same file scope.
 
 5. Shared web scope.
    - Add `--web shared` through an orchestrator-owned search/fetch tool, evidence logging for queries/URLs, and provider-native web disabling checks.
