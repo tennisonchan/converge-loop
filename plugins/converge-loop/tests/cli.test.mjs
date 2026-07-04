@@ -1220,6 +1220,33 @@ test("status tolerates a torn trailing line in turns.jsonl", async () => {
   assert.match(status.stdout, /agreed/);
 });
 
+test("resume repairs a torn trailing turn record before appending new turns", async () => {
+  const stateRoot = tempRoot("torn-resume");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      { message: "need logs", control: { status: "needs_evidence", evidence_requests: ["logs"] } },
+      { message: "resolved", control: { status: "agreed", agreements: ["done"], ready_to_converge: true } }
+    ]
+  });
+  const run = await cli([
+    "run",
+    "--agents", "fake-replay,fake-replay",
+    "--topic", "torn resume",
+    "--fixture", fixture,
+    "--json"
+  ], stateRoot);
+  assert.equal(JSON.parse(run.stdout).status, "needs_evidence");
+  const sessionId = findSingleSessionId(stateRoot);
+  const turnsPath = path.join(stateRoot, "sessions", sessionId, "turns.jsonl");
+  fs.appendFileSync(turnsPath, '{"schema_version":"converge-loop.turn.v1","turn_ind');
+  const resumed = await cli(["resume", sessionId, "--fixture", fixture, "--json"], stateRoot);
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.equal(readResult(stateRoot, sessionId).status, "agreed");
+  const lines = fs.readFileSync(turnsPath, "utf8").split(/\n/).filter(Boolean);
+  for (const line of lines) JSON.parse(line);
+  assert.equal(lines.length, 3);
+});
+
 test("redact strips common secret shapes from error text", async () => {
   const { redact } = await import("../scripts/lib/util.mjs");
   const input = "auth sk-abcdefghijklmnopqrstuv failed; token=abc123secret; key ghp_0123456789abcdef01 AKIAABCDEFGHIJKLMNOP";

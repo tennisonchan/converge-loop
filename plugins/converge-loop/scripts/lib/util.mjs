@@ -34,7 +34,20 @@ export function writeJson(file, value) {
 
 export function appendJsonl(file, value) {
   ensureDir(path.dirname(file));
-  fs.appendFileSync(file, `${JSON.stringify(value)}\n`);
+  // A crash mid-append can leave a torn tail without a newline; appending
+  // directly would corrupt the new record too.
+  let prefix = "";
+  try {
+    const stat = fs.statSync(file);
+    if (stat.size > 0) {
+      const fd = fs.openSync(file, "r");
+      const last = Buffer.alloc(1);
+      fs.readSync(fd, last, 0, 1, stat.size - 1);
+      fs.closeSync(fd);
+      if (last.toString("utf8") !== "\n") prefix = "\n";
+    }
+  } catch {}
+  fs.appendFileSync(file, `${prefix}${JSON.stringify(value)}\n`);
 }
 
 export function appendFile(file, text) {

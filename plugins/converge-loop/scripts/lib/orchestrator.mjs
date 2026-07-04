@@ -30,6 +30,7 @@ export async function runSession({ store, options, stdout, env, sessionId = null
   let session;
   if (resume) {
     session = store.loadSession(sessionId);
+    store.repairTurnsTail(sessionId);
     const resumedFrom = session.state;
     session.state = "running";
     session.options = { ...session.options, ...options, resumed_from: resumedFrom };
@@ -220,7 +221,8 @@ export async function runSession({ store, options, stdout, env, sessionId = null
     store.writeSession(session);
     const job = store.loadJob(session.id);
     if (job) {
-      store.writeJob(session.id, { ...job, status: "running", last_heartbeat_at: nowIso() });
+      const jobStatus = job.status === "canceling" ? "canceling" : "running";
+      store.writeJob(session.id, { ...job, status: jobStatus, last_heartbeat_at: nowIso() });
     }
     printTurn(stdout, options, turn);
 
