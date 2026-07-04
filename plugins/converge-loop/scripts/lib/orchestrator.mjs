@@ -34,10 +34,17 @@ export async function runSession({ store, options, stdout, env, sessionId = null
     const resumedFrom = session.state;
     const previousOptions = session.options || {};
     const suppliedMaterials = [];
+    // Disclose whatever the operator supplied, even when the path matches the
+    // prior options: answering needs_evidence by updating the same file is a
+    // supported pattern, and focus steers all remaining turns.
     for (const key of ["context", "artifact"]) {
-      if (options[key] && options[key] !== previousOptions[key]) {
-        suppliedMaterials.push(`- New ${key} supplied on resume: ${options[key]}`);
+      if (options[key]) {
+        const label = options[key] === previousOptions[key] ? "Refreshed" : "New";
+        suppliedMaterials.push(`- ${label} ${key} supplied on resume: ${options[key]}`);
       }
+    }
+    if (options.focus && options.focus !== previousOptions.focus) {
+      suppliedMaterials.push(`- New focus supplied on resume: ${options.focus}`);
     }
     session.state = "running";
     session.options = { ...previousOptions, ...options, resumed_from: resumedFrom };
