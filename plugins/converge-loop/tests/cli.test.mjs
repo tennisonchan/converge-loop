@@ -1404,6 +1404,40 @@ test("status tolerates a torn trailing line in turns.jsonl", async () => {
   assert.match(status.stdout, /agreed/);
 });
 
+test("resume supplies requested evidence via context override and discloses it", async () => {
+  const stateRoot = tempRoot("resume-evidence");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      { message: "need usage data", control: { status: "needs_evidence", evidence_requests: ["usage data"], ready_to_converge: true } },
+      { message: "evidence reviewed", control: { status: "continue", concessions: ["usage data supports the default"], ready_to_converge: true } },
+      { message: "agreed", control: { status: "agreed", agreements: ["default confirmed"], ready_to_converge: true } }
+    ]
+  });
+  const run = await cliFakes("fake-replay,fake-replay", [
+    "--topic", "resume evidence",
+    "--fixture", fixture,
+    "--json"
+  ], stateRoot);
+  assert.equal(JSON.parse(run.stdout).status, "needs_evidence");
+  const sessionId = findSingleSessionId(stateRoot);
+  const evidencePath = path.join(stateRoot, "usage-data.md");
+  fs.writeFileSync(evidencePath, "REQUESTED USAGE DATA CONTENT");
+  const resumed = await cli([
+    "resume", sessionId,
+    "--context", evidencePath,
+    "--focus", "Requested usage data attached",
+    "--fixture", fixture,
+    "--json"
+  ], stateRoot);
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.equal(readResult(stateRoot, sessionId).status, "agreed");
+  const session = JSON.parse(fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "session.json"), "utf8"));
+  assert.equal(session.options.context, evidencePath);
+  assert.equal(session.options.focus, "Requested usage data attached");
+  const transcript = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "transcript.md"), "utf8");
+  assert.match(transcript, /New context supplied on resume: .*usage-data\.md/);
+});
+
 test("resume repairs a torn trailing turn record before appending new turns", async () => {
   const stateRoot = tempRoot("torn-resume");
   const fixture = writeFixture(stateRoot, {
