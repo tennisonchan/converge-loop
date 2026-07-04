@@ -34,7 +34,20 @@ export function writeJson(file, value) {
 
 export function appendJsonl(file, value) {
   ensureDir(path.dirname(file));
-  fs.appendFileSync(file, `${JSON.stringify(value)}\n`);
+  // A crash mid-append can leave a torn tail without a newline; appending
+  // directly would corrupt the new record too.
+  let prefix = "";
+  try {
+    const stat = fs.statSync(file);
+    if (stat.size > 0) {
+      const fd = fs.openSync(file, "r");
+      const last = Buffer.alloc(1);
+      fs.readSync(fd, last, 0, 1, stat.size - 1);
+      fs.closeSync(fd);
+      if (last.toString("utf8") !== "\n") prefix = "\n";
+    }
+  } catch {}
+  fs.appendFileSync(file, `${prefix}${JSON.stringify(value)}\n`);
 }
 
 export function appendFile(file, text) {
@@ -120,14 +133,40 @@ export function commandExists(command, env = process.env) {
   return result.status === 0;
 }
 
+// Probe the process group first so a surviving grandchild (e.g. a claude
+// that ignored SIGTERM) still counts as alive.
 export function processExists(pid) {
   if (!pid) return false;
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {}
   try {
     process.kill(pid, 0);
     return true;
   } catch {
     return false;
   }
+}
+
+export function signalProcessTree(pid, signal) {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    try {
+      process.kill(pid, signal);
+    } catch {}
+  }
+}
+
+export function redact(text) {
+  return String(text)
+    .replace(/sk-[A-Za-z0-9_-]{16,}/g, "sk-REDACTED")
+    .replace(/\b(ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{16,}\b/g, "$1_REDACTED")
+    .replace(/\b(AKIA|ASIA)[0-9A-Z]{16}\b/g, "$1REDACTED")
+    .replace(/\b[Bb]earer\s+[A-Za-z0-9._~+/=-]{8,}/g, "Bearer REDACTED")
+    .replace(/\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\b/g, "JWT_REDACTED")
+    .replace(/(token|api[_-]?key|authorization)(=|:)\s*["']?[^"'\s]+/gi, "$1$2 REDACTED");
 }
 
 export function copyDir(src, dest) {
