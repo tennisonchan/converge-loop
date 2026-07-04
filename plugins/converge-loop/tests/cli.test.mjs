@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildParticipants } from "../scripts/lib/adapters.mjs";
 import { runCli } from "../scripts/lib/cli.mjs";
+import { parseParticipantOutput } from "../scripts/lib/control.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const binPath = path.join(repoRoot, "scripts/bin/converge-loop.mjs");
@@ -70,7 +71,7 @@ if (args[0] === "exec") {
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", (chunk) => { input += chunk; });
   process.stdin.on("end", () => {
-    const nonce = /nonce ([a-f0-9]+)/i.exec(input)?.[1] || "missing";
+    const nonce = /<<<CONVERGE_LOOP_CONTROL ([a-f0-9]+)>>>/i.exec(input)?.[1] || "missing";
     process.stdout.write("codex smoke ok\\n<<<CONVERGE_LOOP_CONTROL " + nonce + ">>>\\n" + JSON.stringify({
       status: "agreed",
       confidence: "high",
@@ -93,7 +94,7 @@ if (args[0] === "auth" && args[1] === "status" && args[2] === "--json") {
   process.exit(${claudeAuthExit});
 }
 const prompt = args.join(" ");
-const nonce = /nonce ([a-f0-9]+)/i.exec(prompt)?.[1] || "missing";
+const nonce = /<<<CONVERGE_LOOP_CONTROL ([a-f0-9]+)>>>/i.exec(prompt)?.[1] || "missing";
 process.stdout.write("claude smoke ok\\n<<<CONVERGE_LOOP_CONTROL " + nonce + ">>>\\n" + JSON.stringify({
   status: "agreed",
   confidence: "high",
@@ -540,6 +541,40 @@ test("fixture coverage includes terminal statuses", async () => {
     assert.equal(result.code, 0, result.stderr);
     assert.equal(JSON.parse(result.stdout).status, expected);
   }
+});
+
+test("control parser accepts nonce-matching fenced json fallback", () => {
+  const parsed = parseParticipantOutput(`Smoke turn complete.
+
+\`\`\`json
+{
+  "nonce": "abc123",
+  "role": "critic",
+  "topic": "converge-loop setup smoke",
+  "status": "agreed",
+  "ready_to_converge": true,
+  "objections": [],
+  "follow_up_evidence_requested": false
+}
+\`\`\`
+`, { nonce: "abc123" });
+  assert.equal(parsed.control.status, "agreed");
+  assert.equal(parsed.control.ready_to_converge, true);
+  assert.equal(parsed.control.nonce, undefined);
+  assert.equal(parsed.message.trim(), "Smoke turn complete.");
+});
+
+test("control parser accepts root-level json control", () => {
+  const parsed = parseParticipantOutput(JSON.stringify({
+    nonce: "abc123",
+    status: "agreed",
+    ready_to_converge: true,
+    notes: "Local CLI invocation and control block verified working."
+  }), { nonce: "abc123" });
+  assert.equal(parsed.control.status, "agreed");
+  assert.equal(parsed.control.ready_to_converge, true);
+  assert.equal(parsed.control.nonce, undefined);
+  assert.equal(parsed.message, "Local CLI invocation and control block verified working.");
 });
 
 test("max turns and read-only violations produce terminal results", async () => {
