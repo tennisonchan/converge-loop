@@ -41,9 +41,10 @@ export function normalizeControl(control = {}) {
 
 export function parseParticipantOutput(output, { nonce } = {}) {
   if (output && typeof output === "object" && !Buffer.isBuffer(output)) {
+    const control = output.control || (output.status || typeof output.ready_to_converge === "boolean" ? output : {});
     return {
-      message: String(output.message || ""),
-      control: normalizeControl(output.control || {}),
+      message: String(output.message || output.notes || ""),
+      control: normalizeControl(stripNonControlFields(control)),
       evidence: Array.isArray(output.evidence) ? output.evidence : []
     };
   }
@@ -69,12 +70,37 @@ export function parseParticipantOutput(output, { nonce } = {}) {
         };
       }
     }
+    const nonceJson = parseNonceJsonFallback(text, nonce);
+    if (nonceJson) return nonceJson;
   }
   return {
     message: text.trim(),
     control: normalizeControl(),
     evidence: []
   };
+}
+
+function parseNonceJsonFallback(text, nonce) {
+  const fencePattern = /```(?:json)?\s*([\s\S]*?)```/gi;
+  let match;
+  let last = null;
+  while ((match = fencePattern.exec(text)) !== null) {
+    const parsed = tryJson(match[1].trim());
+    if (parsed && parsed.nonce === nonce && (parsed.status || typeof parsed.ready_to_converge === "boolean")) {
+      last = { full: match[0], parsed };
+    }
+  }
+  if (!last) return null;
+  return {
+    message: text.replace(last.full, "").trim(),
+    control: normalizeControl(stripNonControlFields(last.parsed)),
+    evidence: []
+  };
+}
+
+function stripNonControlFields(value = {}) {
+  const { nonce, message, notes, evidence, role, topic, ...control } = value;
+  return control;
 }
 
 export function hasProgress(control) {
