@@ -171,7 +171,7 @@ Real local CLI adapters are enabled through `converge-loop setup`, not by asking
 
 Codex participant invocations include `--ignore-user-config` so nested participant runs do not inherit host-session hooks or plugin config. Authentication still uses `CODEX_HOME`; setup verifies the flag before enabling the local adapter. Claude participant invocations include `--safe-mode` for the same hook-isolation reason while preserving auth, model selection, built-in tools, and permissions.
 
-`--roles` binds positionally to the primary and secondary participants: `roles[0]` is the primary's stance, `roles[1]` the secondary's. When `--roles` is omitted, roles default to `proposer,critic` in participant order.
+`--roles` binds positionally to the primary and secondary participants: `roles[0]` is the primary's stance, `roles[1]` the secondary's. When `--roles` is omitted, roles default to `proposer,critic` in participant order. With a single entry, only the primary's stance is overridden and the secondary falls back to the generic `participant-2` label, not `critic`.
 
 The data model should use participant arrays so future versions can support more than two agents without a schema break, but v1 should focus on two.
 

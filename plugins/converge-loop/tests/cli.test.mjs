@@ -209,6 +209,19 @@ test("--counterpart pairs the host primary with the selected agent", async () =>
   assert.deepEqual(parsed.fallbacks_used, []);
 });
 
+test("--counterpart from a claude host keeps the host primary first", async () => {
+  const stateRoot = tempRoot("counterpart-claude-host");
+  const harness = io(stateRoot);
+  harness.env.CONVERGE_LOOP_HOST = "claude";
+  harness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS = "1";
+  harness.env.CONVERGE_LOOP_ASSUME_LOCAL_CLI_PREFLIGHT = "1";
+  harness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE = "1";
+  const code = await runCli(["run", "--counterpart", "codex", "--topic", "claude host order", "--json"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const parsed = JSON.parse(harness.out.join(""));
+  assert.deepEqual(parsed.participants.map((participant) => participant.adapter), ["claude", "codex"]);
+});
+
 test("--counterpart explicit selection does not fall back when unavailable", async () => {
   const stateRoot = tempRoot("secondary-no-fallback");
   const harness = io(stateRoot);
@@ -639,7 +652,7 @@ test("claude command surface is discoverable as a single command", () => {
   const commandPath = path.join(commandDir, "converge-loop.md");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   assert.equal(manifest.name, "converge-loop");
-  assert.equal(manifest.version, "0.1.1");
+  assert.equal(manifest.version, "0.2.0");
   assert.equal(typeof manifest.description, "string");
   assert.equal(manifest.author?.name, "Tennison Chan");
   assert.deepEqual(fs.readdirSync(commandDir), ["converge-loop.md"]);
