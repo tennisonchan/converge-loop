@@ -120,14 +120,38 @@ export function commandExists(command, env = process.env) {
   return result.status === 0;
 }
 
+// Probe the process group first so a surviving grandchild (e.g. a claude
+// that ignored SIGTERM) still counts as alive.
 export function processExists(pid) {
   if (!pid) return false;
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {}
   try {
     process.kill(pid, 0);
     return true;
   } catch {
     return false;
   }
+}
+
+export function signalProcessTree(pid, signal) {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    try {
+      process.kill(pid, signal);
+    } catch {}
+  }
+}
+
+export function redact(text) {
+  return String(text)
+    .replace(/sk-[A-Za-z0-9_-]{16,}/g, "sk-REDACTED")
+    .replace(/\b(ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{16,}\b/g, "$1_REDACTED")
+    .replace(/\b(AKIA|ASIA)[0-9A-Z]{16}\b/g, "$1REDACTED")
+    .replace(/(token|api[_-]?key|authorization)(=|:)\s*["']?[^"'\s]+/gi, "$1$2 REDACTED");
 }
 
 export function copyDir(src, dest) {

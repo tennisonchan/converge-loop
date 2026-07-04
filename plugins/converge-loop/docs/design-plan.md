@@ -158,7 +158,9 @@ Host identity must be normalized before participant selection. `akx`, `codex`, a
 
 The default agent order is primary host first, opposite agent second. That means the operator should usually invoke `converge-loop run ...` without `--agents`. `--agents` is an override for diagnostics, tests, or intentionally non-default pairings, not the standard skill path.
 
-Fallback applies only to the implicit default opposite-agent path. If an operator supplies `--agents`, the orchestrator treats the selection as intentional and does not replace a failed participant with the host fallback.
+Fallback applies only to the implicit default opposite-agent path. If an operator supplies `--agents`, the orchestrator treats the selection as intentional and does not replace a failed participant with a fallback.
+
+Fallback is enforced at two points. Preflight fallback replaces an unavailable secondary participant before any turns run. Invoke-time fallback handles mid-session adapter failure: a failed turn is retried once on the same adapter (skipped for timeouts), then the failed slot is swapped to the opposite local CLI when it passes preflight, disclosed as degraded coverage in the transcript and result, and only when no swap is possible does the session end `blocked` with `blocked_reason: "adapter_failure"`. Adapter-failure blocked sessions are resumable once adapters are healthy again. Each swapped participant carries `tier: "fallback"` and `fallback_for`, and a slot never swaps twice.
 
 Real local CLI adapters are enabled through `converge-loop setup`, not by asking normal users to set local-adapter environment variables. Setup verifies the local `codex` and `claude` executables, required read-only flag availability, and non-model auth status, then writes a readiness config in the converge-loop state directory. Runtime preflight remains fail-closed when setup has not verified the local controls/auth status or when the installed CLIs no longer satisfy the same flag checks.
 
@@ -315,6 +317,8 @@ Default limits:
 - `--max-tool-calls-per-turn 20`
 - `--max-control-retries 1`
 
+Every invoke attempt is additionally bounded by an orchestrator-level timeout of `--turn-timeout-seconds`, independent of any timeout the adapter enforces internally, so a hung adapter cannot stall the loop. Adapter error text is redacted for common secret shapes before it is persisted to results or transcripts.
+
 Progress is measured against the same participant's previous control: a turn counts as progress only when it adds a new pushback, minor reservation, improvement, evidence citation, evidence request, concession, answered question, status change, or readiness change relative to that participant's prior turn. Restating the same positions verbatim is not movement, and a full round without new movement stops the loop.
 
 The no-progress stop should produce `clear_disagreement` when the disagreement is actionable, or `blocked` when the system cannot tell what would move the conversation forward.
@@ -334,7 +338,7 @@ Foreground and background runs use the same session directory format. Background
 
 `converge-loop cancel <session-id>` sends a graceful signal to the background child, waits for it to persist `result.json` with status `canceled`, and escalates only if the process ignores the graceful signal. A canceled run keeps all completed turns and records that no conclusion was reached.
 
-`converge-loop resume <session-id>` reloads `session.json`, `turns.jsonl`, and participant state, revalidates adapter availability and capability intersection, appends a resume event, and continues from the next turn. Resume is allowed only for sessions in `operator_intervention`, `timeout`, `needs_evidence`, `canceled`, or `stale` when the last completed turn is valid. It is rejected for `agreed`, `clear_disagreement`, and `blocked` unless the operator starts a new run with the prior transcript as context.
+`converge-loop resume <session-id>` reloads `session.json`, `turns.jsonl`, and participant state, revalidates adapter availability and capability intersection, appends a resume event, and continues from the next turn. Resume is allowed for sessions in `operator_intervention`, `timeout`, `needs_evidence`, `canceled`, or `stale` when the last completed turn is valid, plus two recovery cases: sessions stuck in `running` with no result and no live process (an interrupted foreground run; foreground runs treat SIGINT like SIGTERM and record `canceled` when they can), and sessions `blocked` with `blocked_reason: "adapter_failure"`. It is rejected for `agreed`, `clear_disagreement`, and `blocked` unless the operator starts a new run with the prior transcript as context.
 
 ## Output Modes
 
@@ -416,6 +420,7 @@ Before exporting into a Git worktree, the command checks whether the destination
   "scope": "working-tree",
   "web_scope": "off",
   "output_mode": "compact",
+  "fake_coverage": false,
   "agreements": [],
   "pushbacks_resolved": [],
   "remaining_disagreements": [],
@@ -432,6 +437,8 @@ Before exporting into a Git worktree, the command checks whether the destination
   "evidence_ledger_path": "evidence-ledger.jsonl"
 }
 ```
+
+Blocked results carry `blocked_reason` (`preflight`, `adapter_failure`, `enforcement_violation`, or `no_progress`). Results produced by any fake-tier participant set `fake_coverage: true` and append an explicit fake-coverage disclosure to the summary so test output can never pass as real deliberation. `result.json` is validated against contract invariants before it is written (for example, an `agreed` result cannot carry `remaining_disagreements`), and `turns.jsonl` readers tolerate a torn trailing line from a crash mid-append.
 
 `remaining_disagreements` reports unresolved core pushbacks from each participant's latest control, not every pushback ever raised; pushbacks raised earlier and absent from the final round appear in `pushbacks_resolved`. `minor_reservations` disclose the smaller disagreements participants chose to live with when converging.
 
@@ -463,6 +470,8 @@ Participants are read-only:
 - no nested `converge-loop`
 - no nested `review-loop`
 - no delegation to untracked agents
+
+Nested invocation is mechanically enforced: participant subprocesses run with `CONVERGE_LOOP_PARTICIPANT=1`, and `converge-loop run`/`resume` refuse to start when that sentinel is present. Participant subprocesses run in their own process group, and turn-timeout termination signals the whole group (SIGTERM, then SIGKILL) so grandchild processes cannot outlive a canceled turn.
 
 Adapters must mechanically enforce read-only execution and per-call timeouts. If an adapter cannot enforce the same read-only scope and tool constraints as the other participant, it cannot participate in the session.
 

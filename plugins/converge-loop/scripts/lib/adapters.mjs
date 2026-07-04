@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseParticipantOutput } from "./control.mjs";
-import { commandExists, defaultStateRoot, nowIso, readJson, writeJson } from "./util.mjs";
+import { commandExists, defaultStateRoot, nowIso, readJson, redact, signalProcessTree, writeJson } from "./util.mjs";
 
 const LOCAL_ADAPTER_CONFIG_SCHEMA = "converge-loop.local-adapters.v1";
 // Keep this in sync with LocalCliAdapter.invoke; setup and runtime preflight assert these flags.
@@ -186,7 +186,7 @@ export function getAdapter(name, env = process.env) {
   return new UnsupportedAdapter(name);
 }
 
-function providerFor(adapter) {
+export function providerFor(adapter) {
   if (adapter === "codex") return "openai";
   if (adapter === "claude") return "anthropic";
   if (adapter.startsWith("fake-")) return "local-fake";
@@ -339,7 +339,7 @@ class LocalCliAdapter {
     const envelope = tryParseJson(stdout);
     if (envelope && typeof envelope === "object" && ("is_error" in envelope || "structured_output" in envelope || "result" in envelope)) {
       if (envelope.is_error) {
-        throw new Error(`claude reported an error: ${envelope.result || envelope.subtype || "unknown"}`);
+        throw new Error(`claude reported an error: ${redact(envelope.result || envelope.subtype || "unknown")}`);
       }
       if (envelope.structured_output) {
         return envelope.structured_output;
@@ -562,15 +562,19 @@ function delay(ms) {
 
 function runWithTimeout(command, args, stdin, timeoutMs, env = process.env) {
   return new Promise((resolve, reject) => {
+    // detached gives the child its own process group so timeout kills reach
+    // grandchildren the CLI may have spawned; the recursion sentinel stops
+    // participants from starting nested converge-loop runs.
     const child = spawn(command, args, {
       stdio: ["pipe", "pipe", "pipe"],
-      env
+      env: { ...env, CONVERGE_LOOP_PARTICIPANT: "1" },
+      detached: true
     });
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => {
-      child.kill("SIGTERM");
-      const killTimer = setTimeout(() => child.kill("SIGKILL"), 2000);
+      signalProcessTree(child.pid, "SIGTERM");
+      const killTimer = setTimeout(() => signalProcessTree(child.pid, "SIGKILL"), 2000);
       killTimer.unref();
       reject(new Error(`${command} timed out after ${timeoutMs}ms`));
     }, timeoutMs);
@@ -583,7 +587,7 @@ function runWithTimeout(command, args, stdin, timeoutMs, env = process.env) {
     child.on("close", (code) => {
       clearTimeout(timer);
       if (code === 0) resolve(stdout.trim());
-      else reject(new Error(`${command} failed with code ${code}: ${stderr.trim()}`));
+      else reject(new Error(`${command} failed with code ${code}: ${redact(stderr.trim())}`));
     });
     if (stdin) child.stdin.end(stdin);
     else child.stdin.end();

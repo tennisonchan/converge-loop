@@ -1,9 +1,9 @@
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import { RESULT_SCHEMA } from "./constants.mjs";
-import { buildParticipants, getAdapter, preflightParticipants } from "./adapters.mjs";
+import { buildParticipants, getAdapter, preflightParticipants, providerFor } from "./adapters.mjs";
 import { hasNewProgress, isConverged, normalizeControl, parseParticipantOutput } from "./control.mjs";
-import { nowIso, sha256 } from "./util.mjs";
+import { nowIso, redact, sha256 } from "./util.mjs";
 
 const MATERIAL_CHAR_CAP = 48_000;
 const TRANSCRIPT_CHAR_CAP = 40_000;
@@ -57,6 +57,7 @@ export async function runSession({ store, options, stdout, env, sessionId = null
       session,
       participants,
       status: "blocked",
+      blockedReason: "preflight",
       summary: `Cannot start converge-loop: ${preflight.reason}`,
       turnCount: store.readTurns(session.id).length,
       agreements: [],
@@ -133,44 +134,53 @@ export async function runSession({ store, options, stdout, env, sessionId = null
       break;
     }
 
-    const participant = participants[turnIndex % participants.length];
-    const adapter = adapters.get(participant.id) || getAdapter(participant.adapter, env);
+    let participant = participants[turnIndex % participants.length];
+    let adapter = adapters.get(participant.id) || getAdapter(participant.adapter, env);
     const nonce = randomBytes(6).toString("hex");
     const transcript = store.readTurns(session.id);
-    const controlMode = typeof adapter.controlMode === "function" ? adapter.controlMode() : "nonce-block";
-    const prompt = buildTurnPrompt({ options, participant, participants, transcript, nonce, controlMode, materials, latestControls });
-    const maxAttempts = 1 + Math.max(0, options.maxControlRetries ?? 1);
+    const attemptArgs = { options, participants, transcript, nonce, materials, latestControls, turnIndex };
     let parsed = null;
-    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      const attemptPrompt = attempt === 0 ? prompt : buildRepairPrompt(prompt, nonce, controlMode);
-      try {
-        const raw = await adapter.invoke({
-          participant,
-          turnIndex,
-          options: { ...options, __turnIndex: turnIndex, __attempt: attempt },
-          transcript,
-          prompt: attemptPrompt,
-          nonce
-        });
-        if (raw?.violation) {
-          parsed = {
-            message: raw.message || "Adapter reported a read-only enforcement violation.",
-            control: normalizeControl({ status: "blocked" }),
-            evidence: raw.evidence || [],
-            violation: raw.violation
-          };
-          break;
+    try {
+      parsed = await runTurnAttempts({ ...attemptArgs, adapter, participant });
+    } catch (primaryError) {
+      let failure = primaryError;
+      if (!isTimeoutError(primaryError)) {
+        // One same-adapter retry for transient failures; timeouts skip it
+        // because a second full timeout window rarely changes the outcome.
+        try {
+          parsed = await runTurnAttempts({ ...attemptArgs, adapter, participant });
+          failure = null;
+        } catch (retryError) {
+          failure = retryError;
         }
-        parsed = parseParticipantOutput(raw, { nonce });
-        if (parsed.control_found) break;
-      } catch (error) {
+      }
+      if (failure) {
+        const swap = maybeSwapParticipant({ participant, options, env });
+        if (swap) {
+          participants[turnIndex % participants.length] = swap.participant;
+          adapters.set(swap.participant.id, swap.adapter);
+          participant = swap.participant;
+          adapter = swap.adapter;
+          session.participants = participants;
+          store.writeSession(session);
+          writeFallbackDisclosure({ store, session, participants, active: true });
+          printNote(stdout, options, `participant ${participant.id} degraded fallback: ${participant.fallback_for} -> ${participant.adapter}`);
+          try {
+            parsed = await runTurnAttempts({ ...attemptArgs, adapter, participant });
+            failure = null;
+          } catch (swapError) {
+            failure = swapError;
+          }
+        }
+      }
+      if (failure) {
+        const detail = redact(failure.message);
         parsed = {
-          message: `Adapter failed: ${error.message}`,
+          message: `Adapter failed: ${detail}`,
           control: normalizeControl({ status: "blocked" }),
           evidence: [],
-          violation: { type: "adapter_failure", detail: error.message }
+          violation: { type: "adapter_failure", detail }
         };
-        break;
       }
     }
     if (result) break;
@@ -222,6 +232,7 @@ export async function runSession({ store, options, stdout, env, sessionId = null
         session,
         participants,
         status: "blocked",
+        blockedReason: adapterFailure ? "adapter_failure" : "enforcement_violation",
         summary: adapterFailure
           ? `Adapter failure: ${parsed.violation.detail || parsed.violation.type}`
           : `Read-only enforcement violation: ${parsed.violation.detail || parsed.violation.type}`,
@@ -298,6 +309,7 @@ export async function runSession({ store, options, stdout, env, sessionId = null
         session,
         participants,
         status: unresolvedCore.length ? "clear_disagreement" : "blocked",
+        blockedReason: unresolvedCore.length ? null : "no_progress",
         summary: unresolvedCore.length
           ? "Participants repeated unresolved core disagreements without new progress."
           : "No progress was detected and the system cannot determine the next useful move.",
@@ -345,11 +357,16 @@ function buildResult({
   opPoints = [],
   latestControls = new Map(),
   remainingOverride = null,
+  blockedReason = null,
   evidenceSummary
 }) {
   const fallbacks = participants.filter((p) => p.fallback_for);
   const fallbackSummary = fallbacks.length
     ? ` Degraded fallback coverage: ${fallbacks.map((p) => `${p.adapter} handled ${p.fallback_for}`).join(", ")}.`
+    : "";
+  const fakeCoverage = participants.some((p) => p.tier === "fake");
+  const fakeSummary = fakeCoverage
+    ? " Fake-adapter coverage: deterministic test participants, not real deliberation."
     : "";
   const unresolvedCore = dedupe([...latestControls.values()].flatMap((entry) => normalizeControl(entry).pushbacks));
   const minorReservations = dedupe([...latestControls.values()].flatMap((entry) => normalizeControl(entry).minor_reservations));
@@ -357,7 +374,9 @@ function buildResult({
   return {
     schema_version: RESULT_SCHEMA,
     status,
-    summary: `${summary}${fallbackSummary}`,
+    summary: `${summary}${fallbackSummary}${fakeSummary}`,
+    ...(status === "blocked" ? { blocked_reason: blockedReason || "unknown" } : {}),
+    fake_coverage: fakeCoverage,
     conclusion_path: "conclusion.md",
     turn_count: turnCount,
     host_agent: session.options.hostAgent || "codex",
@@ -378,6 +397,82 @@ function buildResult({
     transcript_path: "transcript.md",
     evidence_ledger_path: "evidence-ledger.jsonl"
   };
+}
+
+async function runTurnAttempts({ adapter, participant, participants, options, transcript, nonce, materials, latestControls, turnIndex }) {
+  const controlMode = typeof adapter.controlMode === "function" ? adapter.controlMode() : "nonce-block";
+  const prompt = buildTurnPrompt({ options, participant, participants, transcript, nonce, controlMode, materials, latestControls });
+  const maxAttempts = 1 + Math.max(0, options.maxControlRetries ?? 1);
+  const timeoutMs = options.turnTimeoutSeconds * 1000;
+  let parsed = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const attemptPrompt = attempt === 0 ? prompt : buildRepairPrompt(prompt, nonce, controlMode);
+    const raw = await invokeWithTimeout(adapter, {
+      participant,
+      turnIndex,
+      options: { ...options, __turnIndex: turnIndex, __attempt: attempt },
+      transcript,
+      prompt: attemptPrompt,
+      nonce
+    }, timeoutMs);
+    if (raw?.violation) {
+      return {
+        message: raw.message || "Adapter reported a read-only enforcement violation.",
+        control: normalizeControl({ status: "blocked" }),
+        evidence: raw.evidence || [],
+        violation: raw.violation
+      };
+    }
+    parsed = parseParticipantOutput(raw, { nonce });
+    if (parsed.control_found) break;
+  }
+  return parsed;
+}
+
+// Orchestrator-level bound so a hung adapter (including fakes without an
+// internal timeout) cannot stall the turn loop.
+function invokeWithTimeout(adapter, payload, timeoutMs) {
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${payload.participant.adapter} participant turn timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  return Promise.race([adapter.invoke(payload), timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+function isTimeoutError(error) {
+  return /timed out/.test(String(error?.message || ""));
+}
+
+// Invoke-time degraded fallback: when the default opposite-agent pairing
+// loses an adapter mid-session, swap that slot to the other local CLI rather
+// than killing the whole session. Explicit --agents selections never swap.
+function maybeSwapParticipant({ participant, options, env }) {
+  if (options.agents) return null;
+  if (participant.tier === "fallback" || participant.fallback_for) return null;
+  const target = participant.adapter === "codex" ? "claude" : participant.adapter === "claude" ? "codex" : null;
+  if (!target) return null;
+  const adapter = getAdapter(target, env);
+  const preflight = adapter.preflight({ participant, options, env });
+  if (!preflight.ok) return null;
+  return {
+    adapter,
+    participant: {
+      ...participant,
+      adapter: target,
+      provider: providerFor(target),
+      tier: "fallback",
+      fallback_for: participant.adapter
+    }
+  };
+}
+
+function printNote(stdout, options, text) {
+  if (options.output === "quiet" || options.json) return;
+  stdout.write(`${text}\n`);
 }
 
 function writeFallbackDisclosure({ store, session, participants, active }) {

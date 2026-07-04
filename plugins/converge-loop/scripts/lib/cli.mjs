@@ -272,19 +272,22 @@ function validateRunOptions(options, io) {
 }
 
 async function runRun(args, io) {
+  assertNotParticipant(io.env);
   const options = parseRunArgs(args, io);
   const store = StateStore.fromEnv(io.env);
   if (options.background && !options.backgroundChild) {
     return startBackgroundRun(args, options, io, store);
   }
   const controller = new AbortController();
-  const abortOnSigterm = () => controller.abort();
-  process.once("SIGTERM", abortOnSigterm);
+  const abortOnSignal = () => controller.abort();
+  process.once("SIGTERM", abortOnSignal);
+  process.once("SIGINT", abortOnSignal);
   let result;
   try {
     result = await runSession({ store, options, stdout: io.stdout, env: io.env, sessionId: options.sessionId, signal: controller.signal });
   } finally {
-    process.removeListener("SIGTERM", abortOnSigterm);
+    process.removeListener("SIGTERM", abortOnSignal);
+    process.removeListener("SIGINT", abortOnSignal);
   }
   if (options.backgroundChild && options.sessionId) {
     const job = store.loadJob(options.sessionId);
@@ -392,6 +395,7 @@ function runCancel(args, io) {
 }
 
 async function runResume(args, io) {
+  assertNotParticipant(io.env);
   if (!args[0]) throw new Error("resume requires <session-id>");
   const sessionId = args[0];
   const store = StateStore.fromEnv(io.env);
@@ -409,7 +413,12 @@ async function runResume(args, io) {
   const job = withDerivedJobStatus(store.loadJob(sessionId));
   const stale = job?.derived_status === "stale";
   const status = result?.status || session.state;
-  if (!stale && !RESUMABLE_STATUSES.has(status)) {
+  // Recovery paths: an interrupted foreground run leaves state "running" with
+  // no result and no live process; a dual adapter failure leaves a blocked
+  // result that is safe to retry once adapters are healthy again.
+  const stuckRunning = status === "running" && !result && (!job || !processExists(job.pid));
+  const adapterFailureBlocked = status === "blocked" && result?.blocked_reason === "adapter_failure";
+  if (!stale && !stuckRunning && !adapterFailureBlocked && !RESUMABLE_STATUSES.has(status)) {
     throw new Error(`session ${sessionId} cannot be resumed from status ${status}`);
   }
   const options = { ...session.options, ...parseResumeOverrides(args.slice(1), io), sessionId };
@@ -531,6 +540,7 @@ function ensureCanceledResult({ store, sessionId, job, env = process.env }) {
     minor_reservations: [],
     improvements: [],
     operator_intervention_points: [],
+    fake_coverage: (session.participants || []).some((participant) => participant.tier === "fake"),
     evidence_summary: { observed: [], self_reported: [], residual_asymmetry_risk: "low" },
     recommended_next_actions: [],
     transcript_path: "transcript.md",
@@ -538,6 +548,12 @@ function ensureCanceledResult({ store, sessionId, job, env = process.env }) {
   };
   store.writeConclusion(sessionId, result.summary);
   store.writeResult(sessionId, result);
+}
+
+function assertNotParticipant(env) {
+  if (env.CONVERGE_LOOP_PARTICIPANT === "1") {
+    throw new Error("converge-loop cannot be invoked from inside a converge-loop participant turn");
+  }
 }
 
 function enumValue(name, value, allowed) {

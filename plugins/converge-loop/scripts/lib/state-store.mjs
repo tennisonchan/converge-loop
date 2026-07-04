@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { EVIDENCE_SCHEMA, JOB_SCHEMA, SESSION_SCHEMA, TURN_SCHEMA } from "./constants.mjs";
+import { validateResult } from "./result.mjs";
 import {
   appendFile,
   appendJsonl,
@@ -91,7 +92,7 @@ export class StateStore {
   }
 
   writeResult(sessionId, result) {
-    writeJson(this.sessionFile(sessionId, "result.json"), result);
+    writeJson(this.sessionFile(sessionId, "result.json"), validateResult(result));
   }
 
   loadResult(sessionId) {
@@ -105,7 +106,15 @@ export class StateStore {
   readTurns(sessionId) {
     const file = this.sessionFile(sessionId, "turns.jsonl");
     if (!fs.existsSync(file)) return [];
-    return fs.readFileSync(file, "utf8").trim().split(/\n+/).filter(Boolean).map((line) => JSON.parse(line));
+    // Tolerate a torn line from a crash mid-append instead of failing every
+    // later status/resume/result read.
+    return fs.readFileSync(file, "utf8").split(/\n/).filter(Boolean).flatMap((line) => {
+      try {
+        return [JSON.parse(line)];
+      } catch {
+        return [];
+      }
+    });
   }
 
   listSessions() {
