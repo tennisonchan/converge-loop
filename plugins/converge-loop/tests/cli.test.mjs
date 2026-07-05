@@ -1702,6 +1702,24 @@ test("intervene pauses for the operator and feeds the answer back into deliberat
   assert.match(transcript, /## Operator input \(after turn 1\)/);
 });
 
+test("an answered pause does not mask a participant blocked status", async () => {
+  const { PassThrough } = await import("node:stream");
+  const stateRoot = tempRoot("intervene-blocked");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      { message: "blocked with a question", control: { status: "blocked", operator_intervention_points: ["should we even continue"], ready_to_converge: false } }
+    ]
+  });
+  const harness = io(stateRoot);
+  harness.stdin = new PassThrough();
+  harness.stdin.write("yes continue\n");
+  const code = await runCli(["run", "--fake-adapters", "fake-replay,fake-replay", "--topic", "blocked pause", "--fixture", fixture, "--intervene", "--output", "quiet"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const sessionId = findSingleSessionId(stateRoot);
+  const result = readResult(stateRoot, sessionId);
+  assert.equal(result.status, "blocked", "answered pause must not mask non-operator terminal statuses");
+});
+
 test("intervene without an operator answer ends as operator_intervention", async () => {
   const { PassThrough } = await import("node:stream");
   const stateRoot = tempRoot("intervene-silent");
