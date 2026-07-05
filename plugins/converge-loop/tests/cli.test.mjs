@@ -1925,7 +1925,7 @@ test("shared web enforces the per-turn cap and validates redirect hops", async (
     const base = `http://127.0.0.1:${port}`;
     const fixture = writeFixture(stateRoot, {
       turns: [
-        { message: "many fetches", control: { status: "continue", web_fetch_requests: [`${base}/a`, `${base}/b`, `${base}/c`, `${base}/d`, `${base}/redirect-private`], ready_to_converge: false } },
+        { message: "many fetches", control: { status: "continue", web_fetch_requests: [`${base}/redirect-private`, `${base}/a`, `${base}/b`, `${base}/c`, `${base}/d`], ready_to_converge: false } },
         { message: "ok", control: { status: "agreed", ready_to_converge: true } },
         { message: "ok", control: { status: "agreed", ready_to_converge: true } }
       ]
@@ -1936,15 +1936,53 @@ test("shared web enforces the per-turn cap and validates redirect hops", async (
     assert.equal(code, 0, harness.err.join(""));
     const sessionId = findSingleSessionId(stateRoot);
     const evidence = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "evidence-ledger.jsonl"), "utf8")
-      .trim().split(/\n/).map((line) => JSON.parse(line)).filter((item) => item.kind === "web_fetch");
+      .trim().split(/\n/).map((line) => JSON.parse(line)).filter((item) => item.kind.startsWith("web_fetch"));
     assert.equal(evidence.length, 5, "every request accounted for");
-    const skipped = evidence.filter((item) => /budget exhausted/.test(item.detail));
-    assert.equal(skipped.length, 2, "requests beyond the per-turn cap are skipped");
+    const skipped = evidence.filter((item) => item.kind === "web_fetch_skipped");
+    assert.equal(skipped.length, 2, "requests beyond the per-turn cap are skipped without counting as attempts");
+    const redirectRefused = evidence.filter((item) => /unsupported protocol/.test(item.detail));
+    assert.equal(redirectRefused.length, 1, "redirect hop to a non-http target is refused mid-chain");
     const fetchedOk = evidence.filter((item) => /HTTP 200/.test(item.detail));
-    assert.equal(fetchedOk.length, 3, "per-turn cap of 3 honored");
+    assert.equal(fetchedOk.length, 2, "per-turn attempt cap of 3 honored (one attempt spent on the refused redirect)");
     const materials = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "web-materials.jsonl"), "utf8")
       .trim().split(/\n/).map((line) => JSON.parse(line));
-    assert.equal(materials.length, 3);
+    assert.equal(materials.length, 2);
+  } finally {
+    server.close();
+  }
+});
+
+test("oversized web bodies are truncated at the byte cap while streaming", async () => {
+  const http = await import("node:http");
+  const big = "X".repeat(250_000);
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end(big);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  try {
+    const stateRoot = tempRoot("web-truncate");
+    const fixture = writeFixture(stateRoot, {
+      turns: [
+        { message: "fetch big", control: { status: "continue", web_fetch_requests: [`http://127.0.0.1:${port}/big`], ready_to_converge: false } },
+        { message: "ok", control: { status: "agreed", ready_to_converge: true } },
+        { message: "ok", control: { status: "agreed", ready_to_converge: true } }
+      ]
+    });
+    const harness = io(stateRoot);
+    harness.env.CONVERGE_LOOP_TEST_ALLOW_LOCAL_WEB = "1";
+    const code = await runCli(["run", "--fake-adapters", "fake-replay,fake-replay", "--topic", "big", "--web", "shared", "--fixture", fixture, "--json"], harness);
+    assert.equal(code, 0, harness.err.join(""));
+    const sessionId = findSingleSessionId(stateRoot);
+    const materials = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "web-materials.jsonl"), "utf8")
+      .trim().split(/\n/).map((line) => JSON.parse(line));
+    assert.equal(materials.length, 1);
+    assert.equal(materials[0].truncated, true);
+    assert.ok(materials[0].content.length <= 150_000, "content bounded near the byte cap");
+    const evidence = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "evidence-ledger.jsonl"), "utf8")
+      .trim().split(/\n/).map((line) => JSON.parse(line)).filter((item) => item.kind === "web_fetch");
+    assert.match(evidence[0].detail, /truncated/);
   } finally {
     server.close();
   }

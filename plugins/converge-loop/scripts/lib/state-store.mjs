@@ -125,6 +125,18 @@ export class StateStore {
     });
   }
 
+  readEvidence(sessionId) {
+    const file = this.sessionFile(sessionId, "evidence-ledger.jsonl");
+    if (!fs.existsSync(file)) return [];
+    return fs.readFileSync(file, "utf8").split(/\n/).filter(Boolean).flatMap((line) => {
+      try {
+        return [JSON.parse(line)];
+      } catch {
+        return [];
+      }
+    });
+  }
+
   writeConclusion(sessionId, text) {
     fs.writeFileSync(this.sessionFile(sessionId, "conclusion.md"), text);
   }
