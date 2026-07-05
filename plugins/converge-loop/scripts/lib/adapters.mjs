@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseParticipantOutput } from "./control.mjs";
 import { commandExists, defaultStateRoot, nowIso, readJson, redact, signalProcessTree, writeJson } from "./util.mjs";
+import { knownBadVerdict } from "./adapter-health.mjs";
 
 const LOCAL_ADAPTER_CONFIG_SCHEMA = "converge-loop.local-adapters.v1";
 // Keep this in sync with LocalCliAdapter.invoke; setup and runtime preflight assert these flags.
@@ -149,6 +150,16 @@ export function checkLocalCliReadiness(env = process.env) {
 function checkParticipants(participants, options, env) {
   return participants.map((participant) => {
     const adapter = getAdapter(participant.adapter, env);
+    // A remembered deterministic failure fails preflight fast with the stored
+    // diagnosis, so a session does not rediscover it turn-by-turn and swap.
+    const verdict = participant.tier && participant.tier.startsWith("fake") ? null : knownBadVerdict(env, participant.adapter);
+    if (verdict) {
+      return {
+        participant,
+        adapter,
+        preflight: { ok: false, reason: `${participant.adapter} recently failed (${verdict.category}): ${verdict.reason}${verdict.hint ? ` — ${verdict.hint}` : ""}`, known_bad: true }
+      };
+    }
     const preflight = adapter.preflight({ participant, options, env });
     return { participant, adapter, preflight };
   });
@@ -164,7 +175,8 @@ function maybeBuildFallback({ participants, options, env, failed }) {
     adapter: fallbackAdapter,
     provider: providerFor(fallbackAdapter),
     tier: "fallback",
-    fallback_for: failed.participant.adapter
+    fallback_for: failed.participant.adapter,
+    fallback_reason: failed.preflight.reason || "preflight failed"
   };
   const fallbackParticipants = participants.slice();
   fallbackParticipants[failedIndex] = participant;

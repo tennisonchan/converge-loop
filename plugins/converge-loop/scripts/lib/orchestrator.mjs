@@ -5,6 +5,7 @@ import { RESULT_SCHEMA } from "./constants.mjs";
 import { buildParticipants, getAdapter, preflightParticipants, providerFor } from "./adapters.mjs";
 import { hasNewProgress, isConverged, normalizeControl, parseParticipantOutput } from "./control.mjs";
 import { nowIso, redact, sha256 } from "./util.mjs";
+import { classifyAdapterFailure, clearAdapterHealth, recordAdapterFailure } from "./adapter-health.mjs";
 
 const MATERIAL_CHAR_CAP = 48_000;
 const WEB_FETCH_PER_TURN_CAP = 3;
@@ -101,6 +102,13 @@ export async function runSession({ store, options, stdout, stderr = null, stdin 
   const operatorInputs = store.readOperatorInputs(session.id);
   const webMaterials = store.readWebMaterials(session.id);
   let deadline = Date.now() + options.maxMinutes * 60_000;
+  // Budget coherence: a session that cannot fit one full round of turns within
+  // its wall clock will die as `timeout` under any adapter stress. Warn up
+  // front so the operator can raise --max-minutes or lower --turn-timeout-seconds.
+  const roundBudgetSeconds = participants.length * options.turnTimeoutSeconds;
+  if (startTurn === 0 && options.maxMinutes * 60 < roundBudgetSeconds) {
+    emitWarning(stdout, stderr, options, `converge-loop: --max-minutes ${options.maxMinutes} may be too low; one full round can take up to ${roundBudgetSeconds}s (${participants.length} turns x ${options.turnTimeoutSeconds}s). Consider raising --max-minutes or lowering --turn-timeout-seconds.`);
+  }
   const allEvidence = [];
   const agreements = [];
   const improvements = [];
@@ -163,6 +171,28 @@ export async function runSession({ store, options, stdout, stderr = null, stdin 
       break;
     }
 
+    // Stop before launching a turn that cannot finish inside the remaining
+    // wall clock, so the session ends as a clean resumable timeout instead of
+    // dying mid-turn. At least one turn always runs (turnIndex > startTurn).
+    const estimatedTurnMs = options.turnTimeoutSeconds * 1000;
+    if (turnIndex > startTurn && deadline - Date.now() < estimatedTurnMs) {
+      const remaining = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+      result = buildResult({
+        session,
+        participants,
+        status: "timeout",
+        summary: `Stopped before turn ${turnIndex + 1}: ${remaining}s of wall clock remain, less than one turn timeout (${options.turnTimeoutSeconds}s). Resume with \`converge-loop resume ${session.id}\` or raise --max-minutes.`,
+        turnCount: turnIndex,
+        agreements,
+        improvements,
+        pushbacksRaised,
+        opPoints,
+        latestControls,
+        evidenceSummary: summarizeEvidence(allEvidence)
+      });
+      break;
+    }
+
     let participant = participants[turnIndex % participants.length];
     let adapter = adapters.get(participant.id) || getAdapter(participant.adapter, env);
     const nonce = randomBytes(6).toString("hex");
@@ -174,13 +204,22 @@ export async function runSession({ store, options, stdout, stderr = null, stdin 
       parsed = await runTurnAttempts({ ...attemptArgs, adapter, participant });
     } catch (primaryError) {
       let failure = primaryError;
-      // One same-adapter retry: transient failures get the same window; a
-      // timeout gets a single extended window (both the absolute cap and the
-      // inactivity window double), because a slow model can eat most of the
-      // first window before producing its reply. No new attempt starts past
-      // the wall-clock deadline — retries must not overshoot --max-minutes.
+      const primaryClass = classifyAdapterFailure(primaryError);
+      // A deterministic failure (auth, schema, missing flag) fails the same
+      // way every time: remember it so future sessions fail fast at preflight
+      // instead of rediscovering it, and skip the same-adapter retry that
+      // cannot succeed. Transient failures still get one retry.
+      if (participant.tier !== "fake") {
+        if (primaryClass.class === "deterministic") {
+          recordAdapterFailure(env, participant.adapter, {
+            category: primaryClass.category,
+            reason: redact(primaryError.message),
+            hint: primaryClass.hint
+          });
+        }
+      }
       const timeoutScale = isTimeoutError(primaryError) ? 2 : 1;
-      if (Date.now() < deadline) {
+      if (primaryClass.class !== "deterministic" && Date.now() < deadline) {
         if (timeoutScale > 1) {
           const inactivity = (options.turnInactivitySeconds ?? 0) * timeoutScale;
           const note = `${participant.adapter} turn failed (${redact(primaryError.message)}); retrying once with extended limits (timeout ${options.turnTimeoutSeconds * timeoutScale}s${inactivity ? `, inactivity ${inactivity}s` : ""}).`;
@@ -195,7 +234,8 @@ export async function runSession({ store, options, stdout, stderr = null, stdin 
         }
       }
       if (failure && Date.now() < deadline) {
-        const swap = maybeSwapParticipant({ participant, options, env });
+        const swapReason = `${primaryClass.category}: ${redact(failure.message)}${primaryClass.hint ? ` — ${primaryClass.hint}` : ""}`;
+        const swap = maybeSwapParticipant({ participant, options, env, reason: swapReason });
         if (swap) {
           participants[turnIndex % participants.length] = swap.participant;
           adapters.set(swap.participant.id, swap.adapter);
@@ -204,12 +244,20 @@ export async function runSession({ store, options, stdout, stderr = null, stdin 
           session.participants = participants;
           store.writeSession(session);
           writeFallbackDisclosure({ store, session, participants, active: true });
-          store.writeTranscript(session.id, `\n## Invoke-time fallback (turn ${turnIndex + 1})\n\n- ${participant.fallback_for} failed: ${redact(failure.message)}\n- ${participant.adapter} continues as a degraded fallback.\n\n`);
-          printNote(stdout, options, `participant ${participant.id} degraded fallback: ${participant.fallback_for} -> ${participant.adapter}`);
+          store.writeTranscript(session.id, `\n## Invoke-time fallback (turn ${turnIndex + 1})\n\n- ${participant.fallback_for} failed: ${swapReason}\n- ${participant.adapter} continues as a degraded fallback.\n\n`);
+          printNote(stdout, options, `participant ${participant.id} degraded fallback: ${participant.fallback_for} -> ${participant.adapter} (${swapReason})`);
           try {
             parsed = await runTurnAttempts({ ...attemptArgs, adapter, participant });
             failure = null;
           } catch (swapError) {
+            const swapClass = classifyAdapterFailure(swapError);
+            if (participant.tier !== "fake" && swapClass.class === "deterministic") {
+              recordAdapterFailure(env, participant.adapter, {
+                category: swapClass.category,
+                reason: redact(swapError.message),
+                hint: swapClass.hint
+              });
+            }
             failure = swapError;
           }
         }
@@ -256,6 +304,11 @@ export async function runSession({ store, options, stdout, stderr = null, stdin 
       violation: parsed.violation || null
     };
     store.appendTurn(session.id, turn);
+    // A clean turn proves the adapter is healthy again; drop any remembered
+    // deterministic verdict so it is not skipped next session.
+    if (!parsed.violation && participant.tier !== "fake") {
+      clearAdapterHealth(env, participant.adapter);
+    }
     store.writeTranscript(session.id, renderTurn(turn, options.output));
     session.current_turn_index = turnIndex + 1;
     store.writeSession(session);
@@ -462,7 +515,10 @@ function buildResult({
   blockedReason = null,
   evidenceSummary
 }) {
-  const fallbacks = participants.filter((p) => p.fallback_for);
+  const fallbacks = participants.filter((p) => p.fallback_for).map((p) => ({
+    ...p,
+    fallback_reason: p.fallback_reason || null
+  }));
   const fallbackSummary = fallbacks.length
     ? ` Degraded fallback coverage: ${fallbacks.map((p) => `${p.adapter} handled ${p.fallback_for}`).join(", ")}.`
     : "";
@@ -557,7 +613,7 @@ function isTimeoutError(error) {
 // loses an adapter mid-session, swap that slot to the other local CLI rather
 // than killing the whole session. Explicit selections (--counterpart or
 // --fake-adapters) never swap.
-function maybeSwapParticipant({ participant, options, env }) {
+function maybeSwapParticipant({ participant, options, env, reason = null }) {
   if (options.agents) return null;
   if (participant.tier === "fallback" || participant.fallback_for) return null;
   const target = participant.adapter === "codex" ? "claude" : participant.adapter === "claude" ? "codex" : null;
@@ -572,7 +628,8 @@ function maybeSwapParticipant({ participant, options, env }) {
       adapter: target,
       provider: providerFor(target),
       tier: "fallback",
-      fallback_for: participant.adapter
+      fallback_for: participant.adapter,
+      fallback_reason: reason || "adapter failed"
     }
   };
 }
@@ -785,6 +842,16 @@ async function fetchSharedWeb({ requests, webMaterials, attemptsSoFar = 0, parti
     });
   }
   return results;
+}
+
+function emitWarning(stdout, stderr, options, text) {
+  const stream = stderr || stdout;
+  if (options.json) {
+    stream.write(`${text}\n`);
+    return;
+  }
+  if (options.output === "quiet") return;
+  stream.write(`${text}\n`);
 }
 
 function printNote(stdout, options, text) {

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { DEFAULT_RUN_OPTIONS, RESULT_SCHEMA, RESUMABLE_STATUSES } from "./constants.mjs";
 import { checkLocalCliReadiness, FAKE_ADAPTERS, localAdapterConfigPath, readLocalAdapterConfig, resolveHost, writeLocalAdapterConfig } from "./adapters.mjs";
+import { clearAdapterHealth } from "./adapter-health.mjs";
 import { runSession } from "./orchestrator.mjs";
 import { StateStore } from "./state-store.mjs";
 import {
@@ -113,6 +114,11 @@ async function runSetup(args, io) {
           : "Run converge-loop normally; local Codex and Claude adapters are enabled by setup.")
       : "Install and authenticate Codex and Claude Code, then rerun `converge-loop setup`."
   };
+  // Readiness passing for an adapter clears any stale known-bad verdict so a
+  // fixed adapter is not skipped on the next run.
+  for (const name of ["codex", "claude"]) {
+    if (readiness.checks?.[name]?.ok) clearAdapterHealth(io.env, name);
+  }
   if (options.checkOnly) {
     result.actions = [];
     result.config_changed = false;

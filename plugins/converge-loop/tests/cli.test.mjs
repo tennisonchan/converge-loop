@@ -77,6 +77,7 @@ if (args[0] === "login" && args[1] === "status") {
 }
 if (args[0] === "exec") {
   ${overrides.codexExecFail ? 'process.stderr.write("codex stub forced invoke failure token=abc123secretvalue\\n"); process.exit(1);' : ""}
+  ${overrides.codexExecAuthFail ? 'process.stderr.write("ERROR: 401 Unauthorized: token_invalidated\\n"); process.exit(1);' : ""}
   let input = "";
   process.stdin.setEncoding("utf8");
   process.stdin.on("data", (chunk) => { input += chunk; });
@@ -2109,6 +2110,107 @@ test("turn prompt renders shared web material and instructions", () => {
   assert.match(prompt, /BEGIN WEB https:\/\/example\.com\/spec/);
   assert.match(prompt, /SPEC BODY/);
   assert.match(prompt, /web_fetch_requests/);
+});
+
+test("classifyAdapterFailure separates deterministic and transient failures", async () => {
+  const { classifyAdapterFailure } = await import("../scripts/lib/adapter-health.mjs");
+  assert.equal(classifyAdapterFailure(Object.assign(new Error("x"), { code: "CONVERGE_LOOP_TIMEOUT" })).class, "transient");
+  assert.equal(classifyAdapterFailure(new Error("socket hang up")).class, "transient");
+  assert.equal(classifyAdapterFailure(new Error("401 Unauthorized: token_invalidated")).category, "auth");
+  assert.equal(classifyAdapterFailure(new Error("invalid_json_schema: Missing 'confidence'")).category, "schema");
+  assert.equal(classifyAdapterFailure(new Error("codex missing required read-only flags: --cd")).category, "cli");
+  assert.equal(classifyAdapterFailure(new Error("something novel")).class, "transient");
+  const auth = classifyAdapterFailure(new Error("401 token_invalidated"));
+  assert.equal(auth.class, "deterministic");
+  assert.match(auth.hint, /re-authenticate/);
+});
+
+test("adapter health cache records, expires, clears, and honors the escape hatch", async () => {
+  const health = await import("../scripts/lib/adapter-health.mjs");
+  const stateRoot = tempRoot("health-cache");
+  const env = { CONVERGE_LOOP_STATE_HOME: stateRoot };
+  assert.equal(health.knownBadVerdict(env, "codex"), null);
+  health.recordAdapterFailure(env, "codex", { category: "auth", reason: "token dead", hint: "re-login" });
+  const verdict = health.knownBadVerdict(env, "codex");
+  assert.equal(verdict.category, "auth");
+  assert.equal(verdict.reason, "token dead");
+  assert.equal(health.knownBadVerdict({ ...env, CONVERGE_LOOP_IGNORE_ADAPTER_HEALTH: "1" }, "codex"), null);
+  health.recordAdapterFailure(env, "codex", { category: "auth", reason: "token dead", ttlMs: -1 });
+  assert.equal(health.knownBadVerdict(env, "codex"), null, "expired verdict is ignored");
+  health.recordAdapterFailure(env, "codex", { category: "auth", reason: "again" });
+  health.clearAdapterHealth(env, "codex");
+  assert.equal(health.knownBadVerdict(env, "codex"), null);
+});
+
+test("a deterministic invoke failure records known-bad and skips the same-adapter retry", async () => {
+  const stateRoot = tempRoot("deterministic-record");
+  const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"), { codexExecAuthFail: true });
+  const setupHarness = io(stateRoot);
+  setupHarness.env.PATH = `${binDir}${path.delimiter}${setupHarness.env.PATH || ""}`;
+  delete setupHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
+  await runCli(["setup", "--json"], setupHarness);
+
+  const runHarness = io(stateRoot);
+  runHarness.env.PATH = setupHarness.env.PATH;
+  delete runHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
+  delete runHarness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS;
+  const code = await runCli(["run", "--topic", "deterministic", "--scope", "none", "--json"], runHarness);
+  assert.equal(code, 0, runHarness.err.join(""));
+  const parsed = JSON.parse(runHarness.out.join(""));
+  assert.equal(parsed.status, "agreed");
+  assert.equal(parsed.participants[0].fallback_for, "codex");
+  assert.ok(parsed.fallbacks_used[0].fallback_reason, "fallback reason is recorded in the result");
+  assert.match(parsed.fallbacks_used[0].fallback_reason, /auth/);
+  const sessionId = findSingleSessionId(stateRoot);
+  const transcript = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "transcript.md"), "utf8");
+  assert.doesNotMatch(transcript, /retrying once with extended limits/, "deterministic failure skips the retry");
+  const health = JSON.parse(fs.readFileSync(path.join(stateRoot, "config", "adapter-health.json"), "utf8"));
+  assert.equal(health.adapters.codex.category, "auth");
+});
+
+test("a remembered deterministic failure fails preflight fast on the next run", async () => {
+  const stateRoot = tempRoot("known-bad-preflight");
+  const health = await import("../scripts/lib/adapter-health.mjs");
+  const env = { CONVERGE_LOOP_STATE_HOME: stateRoot };
+  health.recordAdapterFailure(env, "claude", { category: "schema", reason: "invalid_json_schema", hint: "run setup --smoke" });
+  const harness = io(stateRoot);
+  harness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS = "1";
+  harness.env.CONVERGE_LOOP_ASSUME_LOCAL_CLI_PREFLIGHT = "1";
+  harness.env.CONVERGE_LOOP_HOST = "codex";
+  const code = await runCli(["run", "--counterpart", "claude", "--topic", "known bad", "--json"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const parsed = JSON.parse(harness.out.join(""));
+  assert.equal(parsed.status, "blocked");
+  assert.match(parsed.summary, /recently failed \(schema\)/);
+  assert.match(parsed.summary, /run setup --smoke/);
+});
+
+test("a low max-minutes stops before a turn that cannot finish, resumably", async () => {
+  const stateRoot = tempRoot("budget-stop");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      { message: "first", control: { status: "continue", improvements: ["x"], ready_to_converge: false } },
+      { message: "second", control: { status: "agreed", ready_to_converge: true } }
+    ]
+  });
+  // One turn timeout (90s) exceeds the whole 60s wall clock, so after the
+  // first turn there is not enough budget to launch another.
+  const result = await cliFakes("fake-replay,fake-replay", [
+    "--topic", "budget",
+    "--fixture", fixture,
+    "--turn-timeout-seconds", "90",
+    "--max-minutes", "1",
+    "--json"
+  ], stateRoot);
+  assert.equal(result.code, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.status, "timeout");
+  assert.match(parsed.summary, /Stopped before turn 2/);
+  assert.equal(parsed.turn_count, 1);
+  const sessionId = findSingleSessionId(stateRoot);
+  const resumed = await cli(["resume", sessionId, "--fixture", fixture, "--max-minutes", "10", "--json"], stateRoot);
+  assert.equal(resumed.code, 0, resumed.stderr);
+  assert.equal(readResult(stateRoot, sessionId).status, "agreed");
 });
 
 function findSingleSessionId(stateRoot) {
