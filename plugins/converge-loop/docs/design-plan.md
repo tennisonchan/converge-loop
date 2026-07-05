@@ -165,7 +165,9 @@ The default agent order is primary host first, opposite agent second. That means
 
 Fallback applies only to the implicit default opposite-agent path. If an operator supplies `--counterpart` or `--fake-adapters`, the orchestrator treats the selection as intentional and does not replace a failed participant with a fallback.
 
-Fallback is enforced at two points. Preflight fallback replaces an unavailable secondary participant before any turns run. Invoke-time fallback handles mid-session adapter failure: a failed turn is retried once on the same adapter (with a doubled window when the failure was a timeout), then the failed slot is swapped to the opposite local CLI when it passes preflight, disclosed as degraded coverage in the transcript and result, and only when no swap is possible does the session end `blocked` with `blocked_reason: "adapter_failure"`. Adapter-failure blocked sessions are resumable once adapters are healthy again. Each swapped participant carries `tier: "fallback"` and `fallback_for`, and a slot never swaps twice.
+Fallback is enforced at two points. Preflight fallback replaces an unavailable secondary participant before any turns run. Invoke-time fallback handles mid-session adapter failure: a failed turn is retried once on the same adapter (with a doubled window when the failure was a timeout), then the failed slot is swapped to the opposite local CLI when it passes preflight, disclosed as degraded coverage in the transcript and result, and only when no swap is possible does the session end `blocked` with `blocked_reason: "adapter_failure"`. Adapter-failure blocked sessions are resumable once adapters are healthy again. Each swapped participant carries `tier: "fallback"`, `fallback_for`, and a redacted `fallback_reason`, and a slot never swaps twice.
+
+Adapter failures are classified so fallback stays a rare shock absorber rather than a chronic crutch. **Transient** failures (timeouts, dropped connections, unknown errors) get the one same-adapter retry described above. **Deterministic** failures (auth/token, output-schema rejection, missing CLI flags) fail the same way every run, so they skip the useless retry and are remembered: the orchestrator records a TTL-bounded known-bad verdict for that adapter in `config/adapter-health.json` (schema `converge-loop.adapter-health.v1`, default 15-minute TTL). Preflight consults the cache and fails the adapter fast with the stored category, redacted reason, and fix hint, so later sessions do not rediscover the same breakage turn-by-turn and silently swap. A clean turn or a passing `converge-loop setup` clears the verdict; `CONVERGE_LOOP_IGNORE_ADAPTER_HEALTH=1` bypasses the cache for a forced retry.
 
 Real local CLI adapters are enabled through `converge-loop setup`, not by asking normal users to set local-adapter environment variables. Setup verifies the local `codex` and `claude` executables, required read-only flag availability, and non-model auth status, then writes a readiness config in the converge-loop state directory. Runtime preflight remains fail-closed when setup has not verified the local controls/auth status or when the installed CLIs no longer satisfy the same flag checks.
 
@@ -316,6 +318,9 @@ The orchestrator, not the participants, adjudicates materiality for stopping. A 
 
 ## Loop Policy
 
+Wall-clock and turn budgets are kept coherent so a session does not systematically die as `timeout` under adapter stress. At session start, if `--max-minutes` cannot fit one full round of turns at the configured per-turn timeout, the runtime warns the operator to raise `--max-minutes` or lower `--turn-timeout-seconds`. Before each turn, if the remaining wall clock is less than one turn timeout, the session stops early as a clean resumable `timeout` (with a message naming the shortfall) instead of launching a turn that would die mid-flight. At least one turn always runs before this guard applies.
+
+
 Default limits:
 
 - `--max-turns 8`
@@ -431,6 +436,7 @@ Before exporting into a Git worktree, the command checks whether the destination
   ],
   "independent_provider_coverage": true,
   "fallbacks_used": [],
+  "blocked_reason": null,
   "scope": "working-tree",
   "web_scope": "off",
   "output_mode": "compact",
