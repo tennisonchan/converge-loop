@@ -44,6 +44,8 @@ Do not pass fake adapters for normal user-facing deliberation. `fake-sequence`, 
 
 If the real opposite-agent path is not enabled yet and the operator only wants to verify installation, run with `--fake-adapters fake-sequence,fake-sequence` explicitly and disclose that it is fake-adapter smoke coverage; the flag refuses real adapters, so it can never stand in for real deliberation. There is no flag for arbitrary participant lists; the operator surface is the host primary plus `--counterpart codex|claude`.
 
+Default `--max-turns 8` fits focused deliberation. For broad topics, narrow `--topic` or `--focus` first; raise `--max-turns` only when the same session needs several material issues, evidence exchange, or multiple negotiation rounds.
+
 When helping evolve this plugin:
 
 1. Treat `docs/design-plan.md` as the canonical product plan.
