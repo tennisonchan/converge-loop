@@ -271,6 +271,8 @@ class LocalCliAdapter {
   }
 
   preflight({ options, env }) {
+    // Shared web is orchestrator-mediated between turns; provider-native web
+    // stays disabled (claude denylist, codex sandbox), so local CLIs support it.
     if (testUnavailableAdapters(env).includes(this.name)) {
       return { ok: false, reason: `${this.name} adapter forced unavailable by test preflight` };
     }
@@ -287,16 +289,10 @@ class LocalCliAdapter {
     if (!cliCheck.ok) {
       return { ok: false, reason: cliCheck.reason };
     }
-    if (options.web === "shared") {
-      return { ok: false, reason: `${this.name} shared web adapter execution is not implemented yet; fake adapters cover deterministic web-scope tests` };
-    }
     return this.capabilities(options);
   }
 
   capabilities(options) {
-    if (options.web === "shared") {
-      return { ok: false, reason: `${this.name} shared web adapter execution is not implemented yet; fake adapters cover deterministic web-scope tests` };
-    }
     return {
       ok: true,
       capabilities: {
@@ -304,7 +300,7 @@ class LocalCliAdapter {
         provider: providerFor(this.name),
         class: "local-cli",
         file_scope: ["none", "working-tree", "branch"],
-        web_scope: ["off"],
+        web_scope: ["off", "shared"],
         control_output: ["json-schema", "nonce-block"],
         read_only_enforcement: this.name === "codex" ? "sandbox-read-only" : "tool-denylist-plan-mode",
         observed_evidence: [],
@@ -362,7 +358,7 @@ class LocalCliAdapter {
       "--permission-mode",
       "plan",
       "--disallowedTools",
-      "Edit,MultiEdit,Write,Bash(git commit *),Bash(git push *),Bash(converge-loop *),Bash(review-loop *)",
+      "Edit,MultiEdit,Write,WebFetch,WebSearch,Bash(git commit *),Bash(git push *),Bash(converge-loop *),Bash(review-loop *)",
       "--output-format",
       "stream-json",
       "--verbose",

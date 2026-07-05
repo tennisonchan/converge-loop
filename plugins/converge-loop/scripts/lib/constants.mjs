@@ -4,6 +4,7 @@ export const EVIDENCE_SCHEMA = "converge-loop.evidence.v1";
 export const JOB_SCHEMA = "converge-loop.job.v1";
 export const RESULT_SCHEMA = "converge-loop.result.v1";
 export const OPERATOR_INPUT_SCHEMA = "converge-loop.operator-input.v1";
+export const WEB_MATERIAL_SCHEMA = "converge-loop.web-material.v1";
 
 export const TERMINAL_STATUSES = new Set([
   "agreed",

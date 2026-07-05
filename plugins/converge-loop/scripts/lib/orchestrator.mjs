@@ -7,6 +7,11 @@ import { hasNewProgress, isConverged, normalizeControl, parseParticipantOutput }
 import { nowIso, redact, sha256 } from "./util.mjs";
 
 const MATERIAL_CHAR_CAP = 48_000;
+const WEB_FETCH_PER_TURN_CAP = 3;
+const WEB_FETCH_SESSION_CAP = 12;
+const WEB_FETCH_TIMEOUT_MS = 15_000;
+const WEB_FETCH_BYTE_CAP = 100_000;
+const WEB_MATERIAL_PROMPT_CHAR_CAP = 12_000;
 const TRANSCRIPT_CHAR_CAP = 40_000;
 const TURN_MESSAGE_CHAR_CAP = 8_000;
 
@@ -93,6 +98,7 @@ export async function runSession({ store, options, stdout, stderr = null, stdin 
   const materials = loadMaterials(options);
   const startTurn = priorTurns.length;
   const operatorInputs = store.readOperatorInputs(session.id);
+  const webMaterials = store.readWebMaterials(session.id);
   let deadline = Date.now() + options.maxMinutes * 60_000;
   const allEvidence = [];
   const agreements = [];
@@ -157,7 +163,7 @@ export async function runSession({ store, options, stdout, stderr = null, stdin 
     let adapter = adapters.get(participant.id) || getAdapter(participant.adapter, env);
     const nonce = randomBytes(6).toString("hex");
     const transcript = store.readTurns(session.id);
-    const attemptArgs = { options, participants, transcript, nonce, materials, latestControls, operatorInputs, turnIndex };
+    const attemptArgs = { options, participants, transcript, nonce, materials, latestControls, operatorInputs, webMaterials, turnIndex };
     printNote(stdout, options, `turn ${turnIndex + 1} ${participant.role} (${participant.adapter}) thinking (limit ${options.turnTimeoutSeconds}s)…`);
     let parsed = null;
     try {
@@ -396,6 +402,24 @@ export async function runSession({ store, options, stdout, stderr = null, stdin 
       });
       break;
     }
+
+    if (options.web === "shared" && control.web_fetch_requests.length) {
+      const fetched = await fetchSharedWeb({
+        requests: control.web_fetch_requests,
+        webMaterials,
+        participant,
+        turnIndex,
+        env
+      });
+      for (const item of fetched) {
+        if (item.material) {
+          store.appendWebMaterial(session.id, item.material);
+          webMaterials.push(item.material);
+        }
+        store.appendEvidence(session.id, item.evidence);
+        allEvidence.push(item.evidence);
+      }
+    }
   }
 
   if (!result) {
@@ -472,9 +496,9 @@ function buildResult({
   };
 }
 
-async function runTurnAttempts({ adapter, participant, participants, options, transcript, nonce, materials, latestControls, operatorInputs, turnIndex, timeoutScale = 1 }) {
+async function runTurnAttempts({ adapter, participant, participants, options, transcript, nonce, materials, latestControls, operatorInputs, webMaterials, turnIndex, timeoutScale = 1 }) {
   const controlMode = typeof adapter.controlMode === "function" ? adapter.controlMode() : "nonce-block";
-  const prompt = buildTurnPrompt({ options, participant, participants, transcript, nonce, controlMode, materials, latestControls, operatorInputs });
+  const prompt = buildTurnPrompt({ options, participant, participants, transcript, nonce, controlMode, materials, latestControls, operatorInputs, webMaterials });
   const maxAttempts = 1 + Math.max(0, options.maxControlRetries ?? 1);
   const turnTimeoutSeconds = options.turnTimeoutSeconds * timeoutScale;
   const turnInactivitySeconds = (options.turnInactivitySeconds ?? 0) * timeoutScale;
@@ -569,6 +593,120 @@ function askOperator({ promptStream, stdin, points, turnIndex }) {
   });
 }
 
+function isBlockedWebHost(hostname) {
+  const host = String(hostname || "").toLowerCase();
+  if (["localhost", "0.0.0.0", "[::1]", "::1"].includes(host)) return true;
+  if (/^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) || /^169\.254\./.test(host)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true;
+  return false;
+}
+
+function validateWebUrl(raw, env) {
+  let url;
+  try {
+    url = new URL(String(raw));
+  } catch {
+    return { ok: false, reason: "invalid URL" };
+  }
+  if (!["http:", "https:"].includes(url.protocol)) {
+    return { ok: false, reason: `unsupported protocol ${url.protocol}` };
+  }
+  if (env.CONVERGE_LOOP_TEST_ALLOW_LOCAL_WEB !== "1" && isBlockedWebHost(url.hostname)) {
+    return { ok: false, reason: "private or loopback hosts are not fetchable" };
+  }
+  return { ok: true, url };
+}
+
+// Between-turn shared web mediation: the orchestrator fetches for all
+// participants under identical caps and policies, producing observed
+// evidence. Redirects are followed manually so every hop is validated.
+async function fetchWebUrl(rawUrl, env) {
+  let current = rawUrl;
+  for (let hop = 0; hop < 4; hop += 1) {
+    const check = validateWebUrl(current, env);
+    if (!check.ok) return { ok: false, url: current, reason: check.reason };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), WEB_FETCH_TIMEOUT_MS);
+    let response;
+    try {
+      response = await fetch(check.url, { redirect: "manual", signal: controller.signal });
+    } catch (error) {
+      clearTimeout(timer);
+      return { ok: false, url: current, reason: redact(error.message || String(error)) };
+    }
+    clearTimeout(timer);
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers.get("location");
+      if (!location) return { ok: false, url: current, reason: `redirect ${response.status} without location` };
+      current = new URL(location, check.url).toString();
+      continue;
+    }
+    if (!response.ok) {
+      return { ok: false, url: current, reason: `HTTP ${response.status}` };
+    }
+    const text = await response.text();
+    const truncated = text.length > WEB_FETCH_BYTE_CAP;
+    return {
+      ok: true,
+      url: current,
+      status: response.status,
+      content: truncated ? text.slice(0, WEB_FETCH_BYTE_CAP) : text,
+      truncated
+    };
+  }
+  return { ok: false, url: current, reason: "too many redirects" };
+}
+
+async function fetchSharedWeb({ requests, webMaterials, participant, turnIndex, env }) {
+  const seen = new Set(webMaterials.map((item) => item.url));
+  const results = [];
+  const unique = dedupe(requests).filter((url) => !seen.has(String(url)));
+  const budget = Math.max(0, Math.min(WEB_FETCH_PER_TURN_CAP, WEB_FETCH_SESSION_CAP - webMaterials.length));
+  const baseEvidence = () => ({
+    at: nowIso(),
+    turn_index: turnIndex,
+    participant_id: participant.id,
+    participant_role: participant.role,
+    source: "observed",
+    kind: "web_fetch",
+    path: null,
+    query: null
+  });
+  for (const skipped of unique.slice(budget)) {
+    results.push({
+      material: null,
+      evidence: { ...baseEvidence(), url: String(skipped), detail: "skipped: web fetch budget exhausted", hash: null }
+    });
+  }
+  for (const rawUrl of unique.slice(0, budget)) {
+    const fetched = await fetchWebUrl(rawUrl, env);
+    if (!fetched.ok) {
+      results.push({
+        material: null,
+        evidence: { ...baseEvidence(), url: String(rawUrl), detail: `fetch failed: ${fetched.reason}`, hash: null }
+      });
+      continue;
+    }
+    results.push({
+      material: {
+        at: nowIso(),
+        turn_index: turnIndex,
+        requested_by: participant.id,
+        url: fetched.url,
+        truncated: Boolean(fetched.truncated),
+        content: fetched.content
+      },
+      evidence: {
+        ...baseEvidence(),
+        url: fetched.url,
+        detail: `HTTP ${fetched.status}, ${fetched.content.length} chars${fetched.truncated ? " (truncated)" : ""}`,
+        hash: sha256(fetched.content)
+      }
+    });
+  }
+  return results;
+}
+
 function printNote(stdout, options, text) {
   if (options.output === "quiet" || options.json) return;
   stdout.write(`${text}\n`);
@@ -621,7 +759,7 @@ function loadMaterial(materialPath) {
   }
 }
 
-export function buildTurnPrompt({ options, participant, participants = [], transcript = [], nonce, controlMode = "nonce-block", materials = { artifact: null, context: null }, latestControls = new Map(), operatorInputs = [] }) {
+export function buildTurnPrompt({ options, participant, participants = [], transcript = [], nonce, controlMode = "nonce-block", materials = { artifact: null, context: null }, latestControls = new Map(), operatorInputs = [], webMaterials = [] }) {
   const others = participants.filter((entry) => entry.id !== participant.id);
   const counterparts = others.map((entry) => `${entry.role} (${entry.adapter})`).join(", ") || "none";
   const someoneElseConverged = others.some((entry) => {
@@ -666,6 +804,17 @@ export function buildTurnPrompt({ options, participant, participants = [], trans
     ].join("\n"));
   }
 
+  if (webMaterials.length) {
+    sections.push([
+      "Shared web material (fetched by the orchestrator; identical for all participants):",
+      ...webMaterials.map((item) => [
+        `--- BEGIN WEB ${item.url}${item.truncated ? " (truncated)" : ""} ---`,
+        String(item.content || "").slice(0, WEB_MATERIAL_PROMPT_CHAR_CAP),
+        `--- END WEB ${item.url} ---`
+      ].join("\n"))
+    ].join("\n"));
+  }
+
   sections.push(renderTranscriptForPrompt(transcript));
 
   if (operatorInputs.length) {
@@ -684,6 +833,9 @@ export function buildTurnPrompt({ options, participant, participants = [], trans
     "- Use evidence_requests when missing evidence could change the conclusion.",
     "- Respond directly to the other participant's latest points; do not restate your previous turn."
   ];
+  if (options.web === "shared") {
+    convergenceLines.push(`- Web scope is shared: list up to ${WEB_FETCH_PER_TURN_CAP} public http(s) URLs in web_fetch_requests and the orchestrator will fetch them (size-capped) for everyone before the next turn. Provider-native web tools are disabled.`);
+  }
   if (someoneElseConverged) {
     convergenceLines.push("- Your counterpart is ready to converge. State any remaining MATERIAL pushback, missing evidence, or better option that would change the conclusion; otherwise set ready_to_converge=true and move livable concerns into minor_reservations.");
   }
@@ -746,7 +898,7 @@ function renderTranscriptTurn(turn) {
 }
 
 function controlInstructions(nonce, controlMode) {
-  const fields = '"status" ("continue" | "agreed" | "needs_evidence" | "operator_intervention" | "blocked"), "confidence" ("low" | "medium" | "high"), "agreements", "pushbacks", "minor_reservations", "improvements", "open_questions", "evidence_used", "evidence_requests", "concessions", "ready_to_converge" (boolean), "operator_intervention_points", "next_prompt_suggestion"';
+  const fields = '"status" ("continue" | "agreed" | "needs_evidence" | "operator_intervention" | "blocked"), "confidence" ("low" | "medium" | "high"), "agreements", "pushbacks", "minor_reservations", "improvements", "open_questions", "evidence_used", "evidence_requests", "web_fetch_requests", "concessions", "ready_to_converge" (boolean), "operator_intervention_points", "next_prompt_suggestion"';
   if (controlMode === "json-schema") {
     return [
       "Output contract:",

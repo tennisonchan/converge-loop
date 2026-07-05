@@ -11,6 +11,7 @@ export function defaultControl(overrides = {}) {
     open_questions: [],
     evidence_used: [],
     evidence_requests: [],
+    web_fetch_requests: [],
     concessions: [],
     ready_to_converge: false,
     operator_intervention_points: [],
@@ -29,6 +30,7 @@ export function normalizeControl(control = {}) {
     "open_questions",
     "evidence_used",
     "evidence_requests",
+    "web_fetch_requests",
     "concessions",
     "operator_intervention_points"
   ]) {
@@ -149,6 +151,7 @@ const PROGRESS_LIST_KEYS = [
   "open_questions",
   "evidence_used",
   "evidence_requests",
+  "web_fetch_requests",
   "concessions",
   "operator_intervention_points"
 ];
