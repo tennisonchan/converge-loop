@@ -82,7 +82,8 @@ export async function runSession({ store, options, stdout, stderr = null, stdin 
       session,
       participants,
       status: "blocked",
-      blockedReason: "preflight",
+      blockedReason: preflight.blockedReason || "preflight",
+      independentCoverageOverride: preflight.blockedReason === "require_independent" ? false : null,
       summary: `Cannot start converge-loop: ${preflight.reason}`,
       turnCount: store.readTurns(session.id).length,
       agreements: [],
@@ -233,7 +234,27 @@ export async function runSession({ store, options, stdout, stderr = null, stdin 
           failure = retryError;
         }
       }
-      if (failure && Date.now() < deadline) {
+      if (failure && Date.now() < deadline && options.requireIndependent) {
+        const failureClass = classifyAdapterFailure(failure);
+        const detail = `${failureClass.category}: ${redact(failure.message)}${failureClass.hint ? ` — ${failureClass.hint}` : ""}`;
+        result = buildResult({
+          session,
+          participants,
+          status: "blocked",
+          blockedReason: "require_independent",
+          independentCoverageOverride: false,
+          summary: `Independent provider coverage was required, but ${participant.adapter} failed: ${detail}`,
+          turnCount: store.readTurns(session.id).length,
+          agreements,
+          improvements,
+          pushbacksRaised,
+          opPoints,
+          latestControls,
+          remainingOverride: [`independent provider coverage was required but ${participant.adapter} failed`],
+          evidenceSummary: summarizeEvidence(allEvidence)
+        });
+      }
+      if (!result && failure && Date.now() < deadline) {
         const failureClass = classifyAdapterFailure(failure);
         const swapReason = `${failureClass.category}: ${redact(failure.message)}${failureClass.hint ? ` — ${failureClass.hint}` : ""}`;
         const swap = maybeSwapParticipant({ participant, options, env, reason: swapReason });
@@ -514,6 +535,7 @@ function buildResult({
   latestControls = new Map(),
   remainingOverride = null,
   blockedReason = null,
+  independentCoverageOverride = null,
   evidenceSummary
 }) {
   const fallbacks = participants.filter((p) => p.fallback_for).map((p) => ({
@@ -540,7 +562,7 @@ function buildResult({
     turn_count: turnCount,
     host_agent: session.options.hostAgent || "codex",
     participants,
-    independent_provider_coverage: independentCoverage(participants),
+    independent_provider_coverage: independentCoverageOverride ?? independentCoverage(participants),
     fallbacks_used: fallbacks,
     scope: session.options.scope,
     web_scope: session.options.web,
@@ -1160,4 +1182,3 @@ function independentCoverage(participants) {
 function dedupe(values) {
   return [...new Set(values.filter(Boolean))];
 }
-

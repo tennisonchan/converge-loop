@@ -45,7 +45,8 @@ export async function runCli(argv, io) {
 
 async function runSetup(args, io) {
   const options = parseSetupArgs(args);
-  if (options.smoke) assertNotParticipant(io.env);
+  const smokeRequested = setupSmokeRequested(options, io.env);
+  if (smokeRequested) assertNotParticipant(io.env);
   const hostAgent = resolveHost(io.env);
   const warnings = setupWarnings(io.env);
   if (options.disable) {
@@ -85,13 +86,13 @@ async function runSetup(args, io) {
   const verifiedAt = nowIso();
   const currentConfig = readLocalAdapterConfig(io.env);
   let enabled = readiness.ok;
-  let smoke = { requested: options.smoke, ok: null, participants: [] };
+  let smoke = { requested: smokeRequested, ok: null, participants: [] };
   let ok = readiness.ok;
-  if (options.smoke && readiness.ok) {
+  if (smokeRequested && readiness.ok) {
     smoke = await runSetupSmoke({ io, hostAgent });
     ok = readiness.ok && smoke.ok === true;
     enabled = ok;
-  } else if (options.smoke && !readiness.ok) {
+  } else if (smokeRequested && !readiness.ok) {
     smoke = { requested: true, ok: false, participants: [], reason: "readiness checks failed before smoke" };
     ok = false;
     enabled = false;
@@ -110,11 +111,7 @@ async function runSetup(args, io) {
     actions: [],
     warnings,
     config_changed: !options.checkOnly,
-    next_step: ok
-      ? (options.checkOnly
-          ? "Checks passed. Rerun `converge-loop setup` without --check-only to enable local adapters."
-          : "Run converge-loop normally; local Codex and Claude adapters are enabled by setup.")
-      : "Install and authenticate Codex and Claude Code, then rerun `converge-loop setup`."
+    next_step: setupNextStep({ ok, checkOnly: options.checkOnly, readiness, smoke })
   };
   // Readiness passing for an adapter clears any stale known-bad verdict so a
   // fixed adapter is not skipped on the next run.
@@ -262,6 +259,7 @@ export function parseRunArgs(args, io) {
     else if (arg === "--max-control-retries") options.maxControlRetries = nonNegativeInt("--max-control-retries", next());
     else if (arg === "--json") options.json = true;
     else if (arg === "--background") options.background = true;
+    else if (arg === "--require-independent") options.requireIndependent = true;
     else if (arg === "--background-child") options.backgroundChild = true;
     else if (arg === "--session-id") options.sessionId = next();
     else if (arg === "--fixture") options.fixture = path.resolve(io.cwd, next());
@@ -581,18 +579,38 @@ function parseDoctorArgs(args) {
 }
 
 function parseSetupArgs(args) {
-  const options = { json: false, checkOnly: false, disable: false, smoke: false };
+  const options = { json: false, checkOnly: false, disable: false, smoke: false, noSmoke: false };
   for (const arg of args) {
     if (arg === "--json") options.json = true;
     else if (arg === "--check-only") options.checkOnly = true;
     else if (arg === "--disable") options.disable = true;
     else if (arg === "--smoke") options.smoke = true;
+    else if (arg === "--no-smoke") options.noSmoke = true;
     else throw new Error(`unknown setup option: ${arg}`);
   }
   if (options.disable && options.checkOnly) throw new Error("--disable cannot be combined with --check-only");
   if (options.disable && options.smoke) throw new Error("--disable cannot be combined with --smoke");
   if (options.checkOnly && options.smoke) throw new Error("--check-only cannot be combined with --smoke");
+  if (options.smoke && options.noSmoke) throw new Error("--smoke cannot be combined with --no-smoke");
   return options;
+}
+
+function setupSmokeRequested(options, env) {
+  if (options.disable || options.checkOnly || options.noSmoke) return false;
+  if (options.smoke) return true;
+  return env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE !== "1";
+}
+
+function setupNextStep({ ok, checkOnly, readiness, smoke }) {
+  if (ok) {
+    return checkOnly
+      ? "Checks passed. Rerun `converge-loop setup` without --check-only to enable local adapters."
+      : "Run converge-loop normally; local Codex and Claude adapters are enabled by setup.";
+  }
+  if (readiness.ok && smoke?.requested) {
+    return "Setup smoke failed, so local adapters remain disabled. Inspect the smoke diagnostic path, or rerun `converge-loop setup --no-smoke` for readiness-only enablement.";
+  }
+  return "Install and authenticate Codex and Claude Code, then rerun `converge-loop setup`.";
 }
 
 function buildDoctorReport({ sessions, store, env, limit }) {
@@ -978,7 +996,7 @@ function formatDuration(ms) {
 
 function helpText() {
   return `Usage:
-  converge-loop setup [--json] [--check-only] [--disable] [--smoke]
+  converge-loop setup [--json] [--check-only] [--disable] [--smoke] [--no-smoke]
   converge-loop run [options]
   converge-loop status [session-id]
   converge-loop doctor [--json] [--limit N]
@@ -998,6 +1016,7 @@ Run examples:
 Turn budgets:
   --turn-timeout-seconds <n>     absolute per-turn cap (default 420)
   --turn-inactivity-seconds <n>  kill a turn with no CLI output for n seconds (default 120; 0 disables)
+  --require-independent          block instead of using degraded same-provider fallback
   --claude-model / --codex-model per-run model override; persistent defaults live in
                                  local-adapters.json under adapters.<name>.model
 `;
@@ -1009,7 +1028,7 @@ function setupWarnings(env) {
     warnings.push("CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS=1 overrides setup config and enables local adapters.");
   }
   if (env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE === "1") {
-    warnings.push("CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE=1 is for deterministic tests only; setup --smoke will refuse to enable config from fake turns.");
+    warnings.push("CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE=1 is for deterministic tests only; default setup skips smoke, and explicit setup --smoke refuses fake turns.");
   }
   return warnings;
 }

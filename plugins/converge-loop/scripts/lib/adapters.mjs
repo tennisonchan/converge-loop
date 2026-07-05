@@ -76,6 +76,15 @@ export function preflightParticipants(participants, options, env = process.env) 
   const checked = checkParticipants(participants, options, env);
   const failed = checked.find((entry) => !entry.preflight.ok);
   if (failed) {
+    if (options.requireIndependent) {
+      return {
+        ok: false,
+        blockedReason: "require_independent",
+        reason: `independent provider coverage was required but ${failed.participant.adapter} is unavailable: ${failed.preflight.reason}`,
+        checked,
+        participants
+      };
+    }
     const fallback = maybeBuildFallback({ participants, options, env, failed });
     if (fallback) {
       const fallbackChecked = checkParticipants(fallback.participants, options, env);
@@ -98,6 +107,15 @@ export function preflightParticipants(participants, options, env = process.env) 
   }
   const capabilityFailure = firstCapabilityFailure(checked, options);
   if (capabilityFailure) return { ...capabilityFailure, checked };
+  if (options.requireIndependent && !independentProviderCoverage(participants)) {
+    return {
+      ok: false,
+      blockedReason: "require_independent",
+      reason: "selected participants do not provide independent provider coverage",
+      checked,
+      participants
+    };
+  }
   return { ok: true, checked };
 }
 
@@ -181,6 +199,11 @@ function maybeBuildFallback({ participants, options, env, failed }) {
   const fallbackParticipants = participants.slice();
   fallbackParticipants[failedIndex] = participant;
   return { adapter: fallbackAdapter, participants: fallbackParticipants };
+}
+
+function independentProviderCoverage(participants) {
+  const providers = new Set(participants.map((participant) => participant.provider || providerFor(participant.adapter)));
+  return providers.size === participants.length && !participants.some((participant) => participant.tier === "fallback");
 }
 
 function firstPreflightOrCapabilityFailure(checked, options) {
