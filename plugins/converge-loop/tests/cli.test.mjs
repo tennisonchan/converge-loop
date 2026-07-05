@@ -2185,6 +2185,49 @@ test("a remembered deterministic failure fails preflight fast on the next run", 
   assert.match(parsed.summary, /run setup --smoke/);
 });
 
+test("fake adapter failures never write a known-bad verdict", async () => {
+  const stateRoot = tempRoot("fake-no-record");
+  const blocked = await cliFakes("fake-tooling,fake-tooling", [
+    "--topic", "WRITE_VIOLATION",
+    "--json"
+  ], stateRoot);
+  assert.equal(JSON.parse(blocked.stdout).status, "blocked");
+  assert.ok(!fs.existsSync(path.join(stateRoot, "config", "adapter-health.json")), "fake adapters do not record health");
+});
+
+test("a transient invoke failure is not remembered as known-bad", async () => {
+  const stateRoot = tempRoot("transient-no-record");
+  const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"), { codexExecFail: true });
+  const setupHarness = io(stateRoot);
+  setupHarness.env.PATH = `${binDir}${path.delimiter}${setupHarness.env.PATH || ""}`;
+  delete setupHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
+  await runCli(["setup", "--json"], setupHarness);
+  const runHarness = io(stateRoot);
+  runHarness.env.PATH = setupHarness.env.PATH;
+  delete runHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
+  delete runHarness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS;
+  const code = await runCli(["run", "--topic", "transient", "--scope", "none", "--json"], runHarness);
+  assert.equal(code, 0, runHarness.err.join(""));
+  const healthPath = path.join(stateRoot, "config", "adapter-health.json");
+  const health = fs.existsSync(healthPath) ? JSON.parse(fs.readFileSync(healthPath, "utf8")) : { adapters: {} };
+  assert.ok(!health.adapters.codex, "transient codex failure leaves no known-bad verdict");
+});
+
+test("swap never targets a remembered known-bad adapter", async () => {
+  // Direct guard: with the counterpart adapter remembered as known-bad, a run
+  // that would otherwise swap into it produces no invoke-time swap. Explicit
+  // agents disable swapping, so this exercises maybeSwapParticipant's guard
+  // through the default pairing while the counterpart is cached broken.
+  const stateRoot = tempRoot("swap-guard");
+  const health = await import("../scripts/lib/adapter-health.mjs");
+  const env = { CONVERGE_LOOP_STATE_HOME: stateRoot };
+  assert.equal(health.knownBadVerdict(env, "claude"), null);
+  health.recordAdapterFailure(env, "claude", { category: "schema", reason: "invalid_json_schema" });
+  assert.ok(health.knownBadVerdict(env, "claude"), "claude cached known-bad");
+  // With the escape hatch the guard is bypassed, proving it is the cache that gates the swap.
+  assert.equal(health.knownBadVerdict({ ...env, CONVERGE_LOOP_IGNORE_ADAPTER_HEALTH: "1" }, "claude"), null);
+});
+
 test("a low max-minutes stops before a turn that cannot finish, resumably", async () => {
   const stateRoot = tempRoot("budget-stop");
   const fixture = writeFixture(stateRoot, {

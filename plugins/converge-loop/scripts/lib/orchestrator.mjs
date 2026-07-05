@@ -5,7 +5,7 @@ import { RESULT_SCHEMA } from "./constants.mjs";
 import { buildParticipants, getAdapter, preflightParticipants, providerFor } from "./adapters.mjs";
 import { hasNewProgress, isConverged, normalizeControl, parseParticipantOutput } from "./control.mjs";
 import { nowIso, redact, sha256 } from "./util.mjs";
-import { classifyAdapterFailure, clearAdapterHealth, recordAdapterFailure } from "./adapter-health.mjs";
+import { classifyAdapterFailure, clearAdapterHealth, knownBadVerdict, recordAdapterFailure } from "./adapter-health.mjs";
 
 const MATERIAL_CHAR_CAP = 48_000;
 const WEB_FETCH_PER_TURN_CAP = 3;
@@ -234,7 +234,8 @@ export async function runSession({ store, options, stdout, stderr = null, stdin 
         }
       }
       if (failure && Date.now() < deadline) {
-        const swapReason = `${primaryClass.category}: ${redact(failure.message)}${primaryClass.hint ? ` — ${primaryClass.hint}` : ""}`;
+        const failureClass = classifyAdapterFailure(failure);
+        const swapReason = `${failureClass.category}: ${redact(failure.message)}${failureClass.hint ? ` — ${failureClass.hint}` : ""}`;
         const swap = maybeSwapParticipant({ participant, options, env, reason: swapReason });
         if (swap) {
           participants[turnIndex % participants.length] = swap.participant;
@@ -618,6 +619,8 @@ function maybeSwapParticipant({ participant, options, env, reason = null }) {
   if (participant.tier === "fallback" || participant.fallback_for) return null;
   const target = participant.adapter === "codex" ? "claude" : participant.adapter === "claude" ? "codex" : null;
   if (!target) return null;
+  // Do not swap into an adapter already remembered as deterministically broken.
+  if (knownBadVerdict(env, target)) return null;
   const adapter = getAdapter(target, env);
   const preflight = adapter.preflight({ participant, options, env });
   if (!preflight.ok) return null;
