@@ -179,9 +179,11 @@ export class StateStore {
   withJobsLock(fn) {
     const lockDir = path.join(this.jobsRoot, "lock");
     const deadline = Date.now() + 2000;
-    for (;;) {
+    let acquired = false;
+    while (!acquired) {
       try {
         fs.mkdirSync(lockDir);
+        acquired = true;
         break;
       } catch {
         try {
@@ -192,16 +194,18 @@ export class StateStore {
           }
         } catch {}
         if (Date.now() > deadline) break; // proceed unlocked rather than deadlock
-        const wait = Date.now() + 25;
-        while (Date.now() < wait) {} // short spin; job writes are rare and tiny
+        // Sleep without pegging a core; job writes are rare and tiny.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
       }
     }
     try {
       return fn();
     } finally {
-      try {
-        fs.rmdirSync(lockDir);
-      } catch {}
+      if (acquired) {
+        try {
+          fs.rmdirSync(lockDir);
+        } catch {}
+      }
     }
   }
 

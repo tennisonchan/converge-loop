@@ -455,13 +455,12 @@ function runCancel(args, io) {
   const store = StateStore.fromEnv(io.env);
   const job = store.loadJob(sessionId);
   if (!job) throw new Error(`no background job found for ${sessionId}`);
-  // Pid-reuse guard: only signal when the record still claims to be live AND
-  // the heartbeat is fresh; a dead session whose pid was recycled by an
-  // unrelated process has a stale heartbeat and must not be killed.
-  const liveStatus = ["starting", "running", "canceling"].includes(job.status);
-  const heartbeatAge = Date.now() - Date.parse(job.last_heartbeat_at || job.created_at || 0);
-  const heartbeatFresh = Number.isFinite(heartbeatAge) && heartbeatAge < (job.turn_timeout_seconds || 180) * 2000;
-  if (liveStatus && heartbeatFresh && processExists(job.pid)) {
+  // Pid-reuse guard: only signal when the rest of the system still considers
+  // the job live (same 9x-turn-timeout staleness window as status/resume via
+  // withDerivedJobStatus); a dead session whose pid was recycled by an
+  // unrelated process derives stale and must not be killed.
+  const derived = withDerivedJobStatus(job).derived_status;
+  if (["starting", "running", "canceling"].includes(derived) && processExists(job.pid)) {
     signalProcessTree(job.pid, "SIGTERM");
     ensureCanceledResult({ store, sessionId, job, env: io.env });
     store.withJobsLock(() => {

@@ -1801,6 +1801,40 @@ test("cancel does not signal a live pid whose job heartbeat is stale", async () 
   assert.match(cancel.stdout, /stale/);
 });
 
+test("jobs advisory lock: ownership, throw-release, stale break, and timeout safety", async () => {
+  const { StateStore } = await import("../scripts/lib/state-store.mjs");
+  const stateRoot = tempRoot("jobs-lock");
+  const store = new StateStore({ root: stateRoot });
+  const lockDir = path.join(stateRoot, "jobs", "lock");
+
+  // normal acquire/release
+  store.withJobsLock(() => {
+    assert.ok(fs.existsSync(lockDir), "lock held during fn");
+  });
+  assert.ok(!fs.existsSync(lockDir), "lock released after fn");
+
+  // released even when fn throws
+  assert.throws(() => store.withJobsLock(() => { throw new Error("boom"); }), /boom/);
+  assert.ok(!fs.existsSync(lockDir), "lock released after throw");
+
+  // stale lock (older than 5s) is broken and reacquired
+  fs.mkdirSync(lockDir);
+  const old = new Date(Date.now() - 10_000);
+  fs.utimesSync(lockDir, old, old);
+  let ran = false;
+  store.withJobsLock(() => { ran = true; });
+  assert.equal(ran, true);
+  assert.ok(!fs.existsSync(lockDir), "stale lock broken and released");
+
+  // fresh foreign lock: timeout path must NOT delete the holder's lock
+  fs.mkdirSync(lockDir);
+  const before = Date.now();
+  store.withJobsLock(() => {});
+  assert.ok(Date.now() - before >= 1900, "waited for the acquisition deadline");
+  assert.ok(fs.existsSync(lockDir), "foreign lock preserved after timeout");
+  fs.rmdirSync(lockDir);
+});
+
 function findSingleSessionId(stateRoot) {
   const sessions = fs.readdirSync(path.join(stateRoot, "sessions"));
   assert.equal(sessions.length, 1);
