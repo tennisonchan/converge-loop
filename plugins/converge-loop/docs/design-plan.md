@@ -375,6 +375,7 @@ Each session directory contains:
 - `transcript.md`: human-readable transcript.
 - `evidence-ledger.jsonl`: file and web evidence each participant cited or requested.
 - `conclusion.md`: final synthesized result when available.
+- `operator-inputs.jsonl`: operator answers captured during `--intervene` pauses; included in subsequent turn prompts as authoritative preference input.
 - `result.json`: normalized final status.
 
 Every persisted JSON object carries a schema version:
@@ -382,6 +383,7 @@ Every persisted JSON object carries a schema version:
 - `session.json`: `schema_version: "converge-loop.session.v1"`
 - each `turns.jsonl` record: `schema_version: "converge-loop.turn.v1"`
 - each `evidence-ledger.jsonl` record: `schema_version: "converge-loop.evidence.v1"`
+- each `operator-inputs.jsonl` record: `schema_version: "converge-loop.operator-input.v1"`
 - `jobs/<session-id>.json`: `schema_version: "converge-loop.job.v1"`
 - `result.json`: `schema_version: "converge-loop.result.v1"`
 

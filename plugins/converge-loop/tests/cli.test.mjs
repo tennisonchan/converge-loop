@@ -1676,6 +1676,68 @@ test("fake adapter results disclose fake coverage", async () => {
   assert.match(parsed.summary, /Fake-adapter coverage: deterministic test participants/);
 });
 
+test("intervene pauses for the operator and feeds the answer back into deliberation", async () => {
+  const { PassThrough } = await import("node:stream");
+  const stateRoot = tempRoot("intervene-answer");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      { message: "needs a product call", control: { status: "operator_intervention", operator_intervention_points: ["pick the storage default"], ready_to_converge: false } },
+      { message: "with the call made, agreed", control: { status: "agreed", agreements: ["operator picked"], ready_to_converge: true } },
+      { message: "confirmed", control: { status: "agreed", ready_to_converge: true } }
+    ]
+  });
+  const harness = io(stateRoot);
+  harness.stdin = new PassThrough();
+  harness.stdin.write("use sqlite with a 90 day default\n");
+  const code = await runCli(["run", "--fake-adapters", "fake-replay,fake-replay", "--topic", "intervene", "--fixture", fixture, "--intervene", "--output", "quiet"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const sessionId = findSingleSessionId(stateRoot);
+  assert.equal(readResult(stateRoot, sessionId).status, "agreed");
+  assert.match(harness.out.join(""), /operator input needed/);
+  const ledger = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "operator-inputs.jsonl"), "utf8").trim().split(/\n/).map((line) => JSON.parse(line));
+  assert.equal(ledger.length, 1);
+  assert.equal(ledger[0].answer, "use sqlite with a 90 day default");
+  assert.deepEqual(ledger[0].points, ["pick the storage default"]);
+  const transcript = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "transcript.md"), "utf8");
+  assert.match(transcript, /## Operator input \(after turn 1\)/);
+});
+
+test("intervene without an operator answer ends as operator_intervention", async () => {
+  const { PassThrough } = await import("node:stream");
+  const stateRoot = tempRoot("intervene-silent");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      { message: "needs a product call", control: { status: "continue", operator_intervention_points: ["choose the vendor"], ready_to_converge: false } }
+    ]
+  });
+  const harness = io(stateRoot);
+  harness.stdin = new PassThrough();
+  harness.stdin.end();
+  const code = await runCli(["run", "--fake-adapters", "fake-replay,fake-replay", "--topic", "silent", "--fixture", fixture, "--intervene", "--output", "quiet"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const sessionId = findSingleSessionId(stateRoot);
+  const result = readResult(stateRoot, sessionId);
+  assert.equal(result.status, "operator_intervention");
+  assert.match(result.summary, /did not answer/);
+});
+
+test("turn prompt carries prior operator input", () => {
+  const prompt = buildTurnPrompt({
+    options: { topic: "t", scope: "none", cwd: "/repo" },
+    participant: { id: "p2", adapter: "claude", role: "critic" },
+    participants: [
+      { id: "p1", adapter: "codex", role: "proposer" },
+      { id: "p2", adapter: "claude", role: "critic" }
+    ],
+    transcript: [],
+    nonce: "abc123",
+    controlMode: "nonce-block",
+    operatorInputs: [{ turn_index: 0, points: ["pick the storage default"], answer: "use sqlite" }]
+  });
+  assert.match(prompt, /Operator input \(authoritative/);
+  assert.match(prompt, /operator answered: use sqlite/);
+});
+
 function findSingleSessionId(stateRoot) {
   const sessions = fs.readdirSync(path.join(stateRoot, "sessions"));
   assert.equal(sessions.length, 1);

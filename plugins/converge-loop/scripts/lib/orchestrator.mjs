@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
+import readline from "node:readline";
 import { RESULT_SCHEMA } from "./constants.mjs";
 import { buildParticipants, getAdapter, preflightParticipants, providerFor } from "./adapters.mjs";
 import { hasNewProgress, isConverged, normalizeControl, parseParticipantOutput } from "./control.mjs";
@@ -19,7 +20,7 @@ const PARTICIPANT_TERMINAL_STATUSES = new Set([
   "blocked"
 ]);
 
-export async function runSession({ store, options, stdout, env, sessionId = null, resume = false, resumeOverrides = null, signal = null }) {
+export async function runSession({ store, options, stdout, stderr = null, stdin = null, env, sessionId = null, resume = false, resumeOverrides = null, signal = null }) {
   let participants = resume
     ? store.loadSession(sessionId).participants
     : buildParticipants(options, env);
@@ -91,7 +92,8 @@ export async function runSession({ store, options, stdout, env, sessionId = null
   const adapters = new Map(preflight.checked.map((entry) => [entry.participant.id, entry.adapter]));
   const materials = loadMaterials(options);
   const startTurn = priorTurns.length;
-  const deadline = Date.now() + options.maxMinutes * 60_000;
+  const operatorInputs = store.readOperatorInputs(session.id);
+  let deadline = Date.now() + options.maxMinutes * 60_000;
   const allEvidence = [];
   const agreements = [];
   const improvements = [];
@@ -155,7 +157,7 @@ export async function runSession({ store, options, stdout, env, sessionId = null
     let adapter = adapters.get(participant.id) || getAdapter(participant.adapter, env);
     const nonce = randomBytes(6).toString("hex");
     const transcript = store.readTurns(session.id);
-    const attemptArgs = { options, participants, transcript, nonce, materials, latestControls, turnIndex };
+    const attemptArgs = { options, participants, transcript, nonce, materials, latestControls, operatorInputs, turnIndex };
     printNote(stdout, options, `turn ${turnIndex + 1} ${participant.role} (${participant.adapter}) thinking (limit ${options.turnTimeoutSeconds}s)…`);
     let parsed = null;
     try {
@@ -292,7 +294,46 @@ export async function runSession({ store, options, stdout, env, sessionId = null
       break;
     }
 
-    if (PARTICIPANT_TERMINAL_STATUSES.has(control.status)) {
+    let operatorAnswered = false;
+    if (options.intervene && stdin && control.operator_intervention_points.length) {
+      const ask = await askOperator({
+        promptStream: options.json ? (stderr || stdout) : stdout,
+        stdin,
+        points: control.operator_intervention_points,
+        turnIndex
+      });
+      // Human wait time must not consume the session wall clock.
+      deadline += ask.waitedMs;
+      if (ask.text) {
+        const input = {
+          at: nowIso(),
+          turn_index: turnIndex,
+          points: control.operator_intervention_points,
+          answer: ask.text
+        };
+        store.appendOperatorInput(session.id, input);
+        operatorInputs.push(input);
+        store.writeTranscript(session.id, `\n## Operator input (after turn ${turnIndex + 1})\n\n- Points: ${control.operator_intervention_points.join("; ")}\n- Answer: ${ask.text}\n\n`);
+        operatorAnswered = true;
+      } else {
+        result = buildResult({
+          session,
+          participants,
+          status: "operator_intervention",
+          summary: "Operator intervention was requested but the operator did not answer.",
+          turnCount: turnIndex + 1,
+          agreements,
+          improvements,
+          pushbacksRaised,
+          opPoints,
+          latestControls,
+          evidenceSummary: summarizeEvidence(allEvidence)
+        });
+        break;
+      }
+    }
+
+    if (PARTICIPANT_TERMINAL_STATUSES.has(control.status) && !(operatorAnswered && control.status === "operator_intervention")) {
       result = buildResult({
         session,
         participants,
@@ -428,9 +469,9 @@ function buildResult({
   };
 }
 
-async function runTurnAttempts({ adapter, participant, participants, options, transcript, nonce, materials, latestControls, turnIndex, timeoutScale = 1 }) {
+async function runTurnAttempts({ adapter, participant, participants, options, transcript, nonce, materials, latestControls, operatorInputs, turnIndex, timeoutScale = 1 }) {
   const controlMode = typeof adapter.controlMode === "function" ? adapter.controlMode() : "nonce-block";
-  const prompt = buildTurnPrompt({ options, participant, participants, transcript, nonce, controlMode, materials, latestControls });
+  const prompt = buildTurnPrompt({ options, participant, participants, transcript, nonce, controlMode, materials, latestControls, operatorInputs });
   const maxAttempts = 1 + Math.max(0, options.maxControlRetries ?? 1);
   const turnTimeoutSeconds = options.turnTimeoutSeconds * timeoutScale;
   const turnInactivitySeconds = (options.turnInactivitySeconds ?? 0) * timeoutScale;
@@ -504,6 +545,26 @@ function maybeSwapParticipant({ participant, options, env }) {
   };
 }
 
+// Intervention prompts always surface, even in quiet/json modes, so a paused
+// session never looks hung; json mode routes them to stderr to keep the
+// machine-readable stream clean.
+function askOperator({ promptStream, stdin, points, turnIndex }) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    promptStream.write(`\noperator input needed (turn ${turnIndex + 1}):\n${points.map((point) => `- ${point}`).join("\n")}\n> `);
+    const rl = readline.createInterface({ input: stdin });
+    let settled = false;
+    const finish = (text) => {
+      if (settled) return;
+      settled = true;
+      rl.close();
+      resolve({ text: String(text || "").trim(), waitedMs: Date.now() - started });
+    };
+    rl.once("line", finish);
+    rl.once("close", () => finish(""));
+  });
+}
+
 function printNote(stdout, options, text) {
   if (options.output === "quiet" || options.json) return;
   stdout.write(`${text}\n`);
@@ -556,7 +617,7 @@ function loadMaterial(materialPath) {
   }
 }
 
-export function buildTurnPrompt({ options, participant, participants = [], transcript = [], nonce, controlMode = "nonce-block", materials = { artifact: null, context: null }, latestControls = new Map() }) {
+export function buildTurnPrompt({ options, participant, participants = [], transcript = [], nonce, controlMode = "nonce-block", materials = { artifact: null, context: null }, latestControls = new Map(), operatorInputs = [] }) {
   const others = participants.filter((entry) => entry.id !== participant.id);
   const counterparts = others.map((entry) => `${entry.role} (${entry.adapter})`).join(", ") || "none";
   const someoneElseConverged = others.some((entry) => {
@@ -602,6 +663,13 @@ export function buildTurnPrompt({ options, participant, participants = [], trans
   }
 
   sections.push(renderTranscriptForPrompt(transcript));
+
+  if (operatorInputs.length) {
+    sections.push([
+      "Operator input (authoritative for preferences, priorities, and product judgment):",
+      ...operatorInputs.map((input) => `- (after turn ${input.turn_index + 1}) asked: ${(input.points || []).join("; ")} — operator answered: ${input.answer}`)
+    ].join("\n"));
+  }
 
   const convergenceLines = [
     "Convergence contract:",
