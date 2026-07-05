@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { EVIDENCE_SCHEMA, JOB_SCHEMA, SESSION_SCHEMA, TURN_SCHEMA } from "./constants.mjs";
+import { EVIDENCE_SCHEMA, JOB_SCHEMA, OPERATOR_INPUT_SCHEMA, SESSION_SCHEMA, TURN_SCHEMA } from "./constants.mjs";
 import { validateResult } from "./result.mjs";
 import {
   appendFile,
@@ -84,6 +84,25 @@ export class StateStore {
     appendJsonl(this.sessionFile(sessionId, "evidence-ledger.jsonl"), {
       schema_version: EVIDENCE_SCHEMA,
       ...evidence
+    });
+  }
+
+  appendOperatorInput(sessionId, input) {
+    appendJsonl(this.sessionFile(sessionId, "operator-inputs.jsonl"), {
+      schema_version: OPERATOR_INPUT_SCHEMA,
+      ...input
+    });
+  }
+
+  readOperatorInputs(sessionId) {
+    const file = this.sessionFile(sessionId, "operator-inputs.jsonl");
+    if (!fs.existsSync(file)) return [];
+    return fs.readFileSync(file, "utf8").split(/\n/).filter(Boolean).flatMap((line) => {
+      try {
+        return [JSON.parse(line)];
+      } catch {
+        return [];
+      }
     });
   }
 

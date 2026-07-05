@@ -6,6 +6,7 @@ runCli(process.argv.slice(2), {
   env: process.env,
   stdout: process.stdout,
   stderr: process.stderr,
+  stdin: process.stdin,
   binPath: new URL(import.meta.url).pathname
 }).then((code) => {
   process.exitCode = code;

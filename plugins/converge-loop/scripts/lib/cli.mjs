@@ -333,7 +333,7 @@ async function runRun(args, io) {
   process.once("SIGINT", abortOnSignal);
   let result;
   try {
-    result = await runSession({ store, options, stdout: io.stdout, env: io.env, sessionId: options.sessionId, signal: controller.signal });
+    result = await runSession({ store, options, stdout: io.stdout, stderr: io.stderr, stdin: io.stdin || null, env: io.env, sessionId: options.sessionId, signal: controller.signal });
   } finally {
     process.removeListener("SIGTERM", abortOnSignal);
     process.removeListener("SIGINT", abortOnSignal);
@@ -500,7 +500,7 @@ async function runResume(args, io) {
   const overrides = parseResumeOverrides(args.slice(1), io);
   const options = { ...session.options, ...overrides, sessionId };
   writeForegroundJob(store, sessionId, options, io, "resume");
-  const resumedResult = await runSession({ store, options, stdout: io.stdout, env: io.env, sessionId, resume: true, resumeOverrides: overrides });
+  const resumedResult = await runSession({ store, options, stdout: io.stdout, stderr: io.stderr, stdin: io.stdin || null, env: io.env, sessionId, resume: true, resumeOverrides: overrides });
   finalizeJob(store, sessionId, resumedResult);
   return 0;
 }
