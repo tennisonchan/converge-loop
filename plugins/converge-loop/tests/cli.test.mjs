@@ -694,6 +694,7 @@ test("help presents host-aware run example before fake adapter smoke paths", asy
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout, /converge-loop setup/);
   assert.match(result.stdout, /converge-loop run --topic/);
+  assert.match(result.stdout, /converge-loop doctor \[--json\] \[--limit N\]/);
   assert.doesNotMatch(result.stdout, /CONVERGE_LOOP_HOST=akx/);
   assert.doesNotMatch(result.stdout, /fake-sequence,fake-sequence/);
 });
@@ -1028,6 +1029,154 @@ test("default opposite-agent preflight can fall back to degraded host participan
   const sessionId = findSingleSessionId(stateRoot);
   const transcript = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "transcript.md"), "utf8");
   assert.match(transcript, /degraded fallback/i);
+});
+
+test("doctor --json returns zeroed reliability stats for empty state", async () => {
+  const result = await cli(["doctor", "--json"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.schema_version, "converge-loop.doctor.v1");
+  assert.equal(parsed.sessions.total, 0);
+  assert.deepEqual(parsed.sessions.statuses, {});
+  assert.equal(parsed.fallbacks.rate, 0);
+  assert.equal(parsed.timeouts.rate, 0);
+  assert.equal(parsed.independent_provider_coverage.total, 0);
+  assert.equal(parsed.independent_provider_coverage.rate, 0);
+  assert.equal(parsed.turn_elapsed_ms.overall.count, 0);
+  assert.equal(parsed.adapter_health.codex.status, "healthy");
+  assert.equal(parsed.adapter_health.claude.status, "healthy");
+  assert.equal(fs.existsSync(path.join(result.stateRoot, "sessions")), false);
+  assert.equal(fs.existsSync(path.join(result.stateRoot, "jobs")), false);
+});
+
+test("doctor human output is compact and readable", async () => {
+  const result = await cli(["doctor"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /converge-loop doctor/);
+  assert.match(result.stdout, /fallback rate: 0%/);
+  assert.match(result.stdout, /timeout rate: 0%/);
+  assert.match(result.stdout, /codex: healthy/);
+  assert.throws(() => JSON.parse(result.stdout), "human output is intentionally not JSON");
+});
+
+test("doctor aggregates mixed session reliability and excludes fake coverage from independent denominator", async () => {
+  const stateRoot = tempRoot("doctor-mixed");
+
+  const agreedHarness = io(stateRoot);
+  agreedHarness.env.CONVERGE_LOOP_HOST = "codex";
+  agreedHarness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS = "1";
+  agreedHarness.env.CONVERGE_LOOP_ASSUME_LOCAL_CLI_PREFLIGHT = "1";
+  agreedHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE = "1";
+  let code = await runCli(["run", "--topic", "doctor agreed", "--json"], agreedHarness);
+  assert.equal(code, 0, agreedHarness.err.join(""));
+
+  const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"), { codexExecFail: true });
+  const setupHarness = io(stateRoot);
+  setupHarness.env.PATH = `${binDir}${path.delimiter}${setupHarness.env.PATH || ""}`;
+  code = await runCli(["setup", "--json"], setupHarness);
+  assert.equal(code, 0, setupHarness.err.join(""));
+  const fallbackHarness = io(stateRoot);
+  fallbackHarness.env.PATH = setupHarness.env.PATH;
+  code = await runCli(["run", "--topic", "doctor fallback", "--scope", "none", "--json"], fallbackHarness);
+  assert.equal(code, 0, fallbackHarness.err.join(""));
+
+  const timeoutFixture = writeFixture(stateRoot, {
+    turns: [
+      { message: "only turn", control: { status: "continue", improvements: ["started"], ready_to_converge: false } }
+    ]
+  });
+  const timeout = await cliFakes("fake-replay,fake-replay", [
+    "--topic", "doctor timeout",
+    "--fixture", timeoutFixture,
+    "--turn-timeout-seconds", "90",
+    "--max-minutes", "1",
+    "--json"
+  ], stateRoot);
+  assert.equal(timeout.code, 0, timeout.stderr);
+  assert.equal(JSON.parse(timeout.stdout).status, "timeout");
+
+  const fakeFixture = writeFixture(stateRoot, {
+    turns: [
+      { message: "first", control: { status: "continue", improvements: ["one"], ready_to_converge: false } },
+      { delay_ms: 25, message: "second", control: { status: "agreed", agreements: ["two"], ready_to_converge: true } }
+    ]
+  });
+  const fake = await cliFakes("fake-replay,fake-replay", [
+    "--topic", "doctor fake",
+    "--fixture", fakeFixture,
+    "--json"
+  ], stateRoot);
+  assert.equal(fake.code, 0, fake.stderr);
+  assert.equal(JSON.parse(fake.stdout).fake_coverage, true);
+
+  const doctor = await cli(["doctor", "--json", "--limit", "4"], stateRoot);
+  assert.equal(doctor.code, 0, doctor.stderr);
+  const parsed = JSON.parse(doctor.stdout);
+  assert.equal(parsed.sessions.total, 4);
+  assert.equal(parsed.sessions.statuses.agreed, 3);
+  assert.equal(parsed.sessions.statuses.timeout, 1);
+  assert.equal(parsed.fallbacks.count, 1);
+  assert.equal(parsed.fallbacks.rate, 0.25);
+  assert.ok(Object.values(parsed.fallbacks.reasons).some((count) => count === 1));
+  assert.equal(parsed.timeouts.count, 1);
+  assert.equal(parsed.timeouts.rate, 0.25);
+  assert.equal(parsed.independent_provider_coverage.total, 2);
+  assert.equal(parsed.independent_provider_coverage.count, 1);
+  assert.equal(parsed.independent_provider_coverage.excluded_fake_sessions, 2);
+  assert.equal(parsed.independent_provider_coverage.rate, 0.5);
+  assert.equal(parsed.turn_elapsed_ms.overall.count > 0, true);
+  assert.equal(Number.isFinite(parsed.turn_elapsed_ms.overall.mean), true);
+  assert.equal(Number.isFinite(parsed.turn_elapsed_ms.overall.median), true);
+  assert.ok(parsed.turn_elapsed_ms.by_adapter.codex || parsed.turn_elapsed_ms.by_adapter["fake-replay"]);
+});
+
+test("doctor reports known-bad adapter health with redacted reason and healthy adapters", async () => {
+  const health = await import("../scripts/lib/adapter-health.mjs");
+  const stateRoot = tempRoot("doctor-health");
+  const env = { CONVERGE_LOOP_STATE_HOME: stateRoot };
+  health.recordAdapterFailure(env, "codex", {
+    category: "auth",
+    reason: "token=abc123secretvalue rejected",
+    hint: "re-login"
+  });
+  const result = await cli(["doctor", "--json"], stateRoot);
+  assert.equal(result.code, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.adapter_health.codex.status, "known_bad");
+  assert.equal(parsed.adapter_health.codex.category, "auth");
+  assert.equal(parsed.adapter_health.codex.reason, "token= REDACTED rejected");
+  assert.equal(parsed.adapter_health.codex.hint, "re-login");
+  assert.equal(Number.isFinite(parsed.adapter_health.codex.ttl_ms), true);
+  assert.equal(parsed.adapter_health.claude.status, "healthy");
+});
+
+test("doctor aggregates blocked reasons", async () => {
+  const stateRoot = tempRoot("doctor-blocked");
+  const harness = io(stateRoot);
+  harness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS = "1";
+  harness.env.CONVERGE_LOOP_ASSUME_LOCAL_CLI_PREFLIGHT = "1";
+  harness.env.CONVERGE_LOOP_TEST_UNAVAILABLE_ADAPTERS = "claude";
+  harness.env.CONVERGE_LOOP_HOST = "codex";
+  const code = await runCli(["run", "--counterpart", "claude", "--topic", "doctor blocked", "--json"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  assert.equal(JSON.parse(harness.out.join("")).blocked_reason, "preflight");
+
+  const result = await cli(["doctor", "--json"], stateRoot);
+  assert.equal(result.code, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.sessions.statuses.blocked, 1);
+  assert.equal(parsed.blocked_reasons.preflight, 1);
+});
+
+test("doctor refuses inside a converge-loop participant turn", async () => {
+  const stateRoot = tempRoot("doctor-participant");
+  const harness = io(stateRoot);
+  harness.env.CONVERGE_LOOP_PARTICIPANT = "1";
+  const code = await runCli(["doctor", "--json"], harness);
+  assert.equal(code, 1);
+  assert.deepEqual(harness.out, []);
+  assert.match(harness.err.join(""), /cannot be invoked from inside a converge-loop participant turn/);
 });
 
 test("explicit participant selection does not use degraded fallback implicitly", async () => {

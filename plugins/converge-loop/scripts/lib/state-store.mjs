@@ -14,16 +14,18 @@ import {
 } from "./util.mjs";
 
 export class StateStore {
-  constructor({ root }) {
+  constructor({ root, ensure = true }) {
     this.root = root;
     this.sessionsRoot = path.join(root, "sessions");
     this.jobsRoot = path.join(root, "jobs");
-    ensureDir(this.sessionsRoot);
-    ensureDir(this.jobsRoot);
+    if (ensure) {
+      ensureDir(this.sessionsRoot);
+      ensureDir(this.jobsRoot);
+    }
   }
 
-  static fromEnv(env) {
-    return new StateStore({ root: defaultStateRoot(env) });
+  static fromEnv(env, options = {}) {
+    return new StateStore({ root: defaultStateRoot(env), ...options });
   }
 
   createSession({ sessionId = createSessionId(), cwd, options, participants }) {

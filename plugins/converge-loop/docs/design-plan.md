@@ -80,6 +80,7 @@ converge-loop run --scope working-tree --output verbose
 converge-loop run --background --artifact plan.md
 converge-loop status
 converge-loop status <session-id>
+converge-loop doctor
 converge-loop resume <session-id>
 converge-loop result <session-id>
 converge-loop cancel <session-id>
@@ -122,6 +123,8 @@ Useful `run` options:
 `--scope branch` requires `--base <ref>`. If omitted, the command fails before launching participants with a clear validation error. `--artifact` and `--context` must exist, be readable files, and resolve inside the current working directory unless an absolute path is supplied intentionally. Missing or unreadable paths are invalid input.
 
 `converge-loop status` without an id lists recent active and terminal sessions. `converge-loop status <session-id>` shows one session. Background runs print a session id immediately so the operator can call `converge-loop status <session-id>`, `converge-loop result <session-id>`, `converge-loop resume <session-id>`, or `converge-loop cancel <session-id>`.
+
+`converge-loop doctor [--json] [--limit N]` is a read-only reliability view over recent stored sessions. It reports terminal status counts, fallback and timeout rates over all included sessions, fallback reasons, independent-provider coverage excluding fake-adapter sessions, blocked reasons, elapsed turn-duration statistics overall and per adapter, and current adapter-health cache verdicts. Turn durations are elapsed wall-clock gaps between persisted turn timestamps, not compute-only timings.
 
 ## Command Runtime and Plugin Wiring
 
@@ -395,6 +398,7 @@ Every persisted JSON object carries a schema version:
 - each `web-materials.jsonl` record: `schema_version: "converge-loop.web-material.v1"`
 - `jobs/<session-id>.json`: `schema_version: "converge-loop.job.v1"`
 - `result.json`: `schema_version: "converge-loop.result.v1"`
+- `doctor --json`: `schema_version: "converge-loop.doctor.v1"`
 
 The v1 runtime may reject newer major schema versions with a clear error. Minor additive fields are ignored by readers unless they are required by a future `minimum_runtime_version` field.
 
