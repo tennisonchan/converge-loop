@@ -304,6 +304,7 @@ export async function runSession({ store, options, stdout, stderr = null, stdin 
       });
       // Human wait time must not consume the session wall clock.
       deadline += ask.waitedMs;
+      if (result) break;
       if (ask.text) {
         const input = {
           at: nowIso(),
@@ -551,7 +552,8 @@ function maybeSwapParticipant({ participant, options, env }) {
 function askOperator({ promptStream, stdin, points, turnIndex }) {
   return new Promise((resolve) => {
     const started = Date.now();
-    promptStream.write(`\noperator input needed (turn ${turnIndex + 1}):\n${points.map((point) => `- ${point}`).join("\n")}\n> `);
+    const safePoints = points.map((point) => String(point).replace(/[\x00-\x1f\x7f]+/g, " ").trim());
+    promptStream.write(`\noperator input needed (turn ${turnIndex + 1}):\n${safePoints.map((point) => `- ${point}`).join("\n")}\n> `);
     const rl = readline.createInterface({ input: stdin });
     let settled = false;
     const finish = (text) => {
