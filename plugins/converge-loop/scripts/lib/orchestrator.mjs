@@ -1024,8 +1024,11 @@ function normalizeEvidence(evidence, { turnIndex, participant, control }) {
     turn_index: turnIndex,
     participant_id: participant.id,
     participant_role: participant.role,
-    source: item.source || "self_reported",
-    kind: item.kind || "summary",
+    // "observed" provenance is orchestrator-minted only; participant-supplied
+    // entries are always self-reported and cannot claim web_fetch kinds,
+    // which would forge trust and consume the shared web budget.
+    source: "self_reported",
+    kind: item.kind && !String(item.kind).startsWith("web_fetch") ? item.kind : "summary",
     path: item.path || null,
     url: item.url || null,
     query: item.query || null,
