@@ -23,13 +23,13 @@ const CLASSIFIERS = [
     category: "auth",
     class: "deterministic",
     hint: "re-authenticate the local CLI (`codex login` or `claude auth login`), then rerun `converge-loop setup`.",
-    test: (_error, message) => /token_invalidated|refresh_token_invalidated|not logged in|logged out|unauthor|\b401\b|auth error/i.test(message)
+    test: (_error, message) => /token_invalidated|refresh_token_invalidated|not logged in|logged out|unauthorized|auth error|401 unauthorized/i.test(message)
   },
   {
     category: "schema",
     class: "deterministic",
     hint: "the provider rejected the output schema; update the local CLI and run `converge-loop setup --smoke` to re-verify.",
-    test: (_error, message) => /invalid_json_schema|invalid_request_error|unsupported schema|\b400\b/i.test(message)
+    test: (_error, message) => /invalid_json_schema|unsupported schema|schema.*(is required|must be)|output schema/i.test(message)
   },
   {
     category: "cli",
@@ -102,6 +102,6 @@ export function knownBadVerdict(env, adapter) {
   const entry = readAdapterHealth(env).adapters[adapter];
   if (!entry) return null;
   const expires = Date.parse(entry.expires_at || 0);
-  if (Number.isFinite(expires) && expires < Date.now()) return null;
+  if (!Number.isFinite(expires) || expires < Date.now()) return null;
   return entry;
 }
