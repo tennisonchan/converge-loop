@@ -39,6 +39,7 @@ After package linking, package installation, or Codex plugin installation, use t
 converge-loop setup
 converge-loop run --topic "Decide the retention default for exported sessions"
 converge-loop status
+converge-loop doctor
 converge-loop result <session-id>
 converge-loop cancel <session-id>
 converge-loop resume <session-id>
@@ -55,6 +56,8 @@ Setup controls:
 - `converge-loop setup --smoke`: after normal readiness passes, run a tiny real Codex + Claude adapter exchange before enabling config. This can spend model calls.
 
 If the default opposite-agent path is unavailable, converge-loop may use the primary host adapter as a degraded fallback and will disclose that in the result. If the requested scope cannot be provided symmetrically, such as `--web shared` before shared web support is implemented, the run blocks instead of silently widening or changing access.
+
+Use `converge-loop doctor [--json] [--limit N]` to inspect recent reliability from stored sessions without calling models or mutating state. It reports status counts, fallback and timeout rates over all included sessions, independent-provider coverage excluding fake-adapter sessions, blocked reasons, elapsed turn-duration stats, and the current adapter-health cache.
 
 ## Models and turn budgets
 

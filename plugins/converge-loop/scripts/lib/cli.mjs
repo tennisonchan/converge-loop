@@ -2,9 +2,9 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { DEFAULT_RUN_OPTIONS, RESULT_SCHEMA, RESUMABLE_STATUSES } from "./constants.mjs";
+import { DEFAULT_RUN_OPTIONS, DOCTOR_SCHEMA, RESULT_SCHEMA, RESUMABLE_STATUSES } from "./constants.mjs";
 import { checkLocalCliReadiness, FAKE_ADAPTERS, localAdapterConfigPath, readLocalAdapterConfig, resolveHost, writeLocalAdapterConfig } from "./adapters.mjs";
-import { clearAdapterHealth } from "./adapter-health.mjs";
+import { clearAdapterHealth, knownBadVerdict } from "./adapter-health.mjs";
 import { runSession } from "./orchestrator.mjs";
 import { StateStore } from "./state-store.mjs";
 import {
@@ -16,6 +16,7 @@ import {
   nowIso,
   pathInside,
   processExists,
+  redact,
   signalProcessTree,
   resolveReadablePath,
   runGit
@@ -30,6 +31,7 @@ export async function runCli(argv, io) {
     if (command === "result") return runResult(argv.slice(1), io);
     if (command === "cancel") return runCancel(argv.slice(1), io);
     if (command === "resume") return await runResume(argv.slice(1), io);
+    if (command === "doctor") return runDoctor(argv.slice(1), io);
     if (command === "help" || command === "--help" || command === "-h") {
       io.stdout.write(helpText());
       return 0;
@@ -454,6 +456,20 @@ function runResult(args, io) {
   return 0;
 }
 
+function runDoctor(args, io) {
+  assertNotParticipant(io.env);
+  const options = parseDoctorArgs(args);
+  const store = StateStore.fromEnv(io.env, { ensure: false });
+  const sessions = store.listSessions().slice(0, options.limit);
+  const report = buildDoctorReport({ sessions, store, env: io.env, limit: options.limit });
+  if (options.json) {
+    io.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  } else {
+    io.stdout.write(renderDoctor(report));
+  }
+  return 0;
+}
+
 function runCancel(args, io) {
   assertNotParticipant(io.env);
   if (!args[0]) throw new Error("cancel requires <session-id>");
@@ -547,6 +563,23 @@ function parseResultArgs(args) {
   return options;
 }
 
+function parseDoctorArgs(args) {
+  const options = { json: false, limit: 50 };
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--json") {
+      options.json = true;
+    } else if (arg === "--limit") {
+      i += 1;
+      if (!args[i]) throw new Error("--limit requires a value");
+      options.limit = positiveInt("--limit", args[i]);
+    } else {
+      throw new Error(`unknown doctor option: ${arg}`);
+    }
+  }
+  return options;
+}
+
 function parseSetupArgs(args) {
   const options = { json: false, checkOnly: false, disable: false, smoke: false };
   for (const arg of args) {
@@ -560,6 +593,146 @@ function parseSetupArgs(args) {
   if (options.disable && options.smoke) throw new Error("--disable cannot be combined with --smoke");
   if (options.checkOnly && options.smoke) throw new Error("--check-only cannot be combined with --smoke");
   return options;
+}
+
+function buildDoctorReport({ sessions, store, env, limit }) {
+  const statusCounts = {};
+  const fallbackReasons = {};
+  const blockedReasons = {};
+  let fallbackSessionCount = 0;
+  let timeoutCount = 0;
+  let independentCount = 0;
+  let independentTotal = 0;
+  let fakeExcluded = 0;
+  const elapsedSamples = [];
+  const elapsedByAdapter = new Map();
+
+  for (const { session, result } of sessions) {
+    const status = result?.status || session?.state || "unknown";
+    statusCounts[status] = (statusCounts[status] || 0) + 1;
+    if (status === "timeout") timeoutCount += 1;
+    if (status === "blocked") {
+      const reason = redact(result?.blocked_reason || "unknown");
+      blockedReasons[reason] = (blockedReasons[reason] || 0) + 1;
+    }
+
+    const fallbacks = Array.isArray(result?.fallbacks_used) ? result.fallbacks_used : [];
+    if (fallbacks.length) {
+      fallbackSessionCount += 1;
+      for (const fallback of fallbacks) {
+        const reason = redact(fallback?.fallback_reason || "unknown");
+        fallbackReasons[reason] = (fallbackReasons[reason] || 0) + 1;
+      }
+    }
+
+    if (result?.fake_coverage === true) {
+      fakeExcluded += 1;
+    } else if (result) {
+      independentTotal += 1;
+      if (result.independent_provider_coverage === true) independentCount += 1;
+    }
+
+    for (const sample of elapsedTurnSamples(store, session?.id)) {
+      elapsedSamples.push(sample.ms);
+      const adapter = sample.adapter || "unknown";
+      if (!elapsedByAdapter.has(adapter)) elapsedByAdapter.set(adapter, []);
+      elapsedByAdapter.get(adapter).push(sample.ms);
+    }
+  }
+
+  return {
+    schema_version: DOCTOR_SCHEMA,
+    limit,
+    sessions: {
+      total: sessions.length,
+      statuses: sortCounts(statusCounts)
+    },
+    fallbacks: {
+      count: fallbackSessionCount,
+      rate: rate(fallbackSessionCount, sessions.length),
+      reasons: sortCounts(fallbackReasons)
+    },
+    timeouts: {
+      count: timeoutCount,
+      rate: rate(timeoutCount, sessions.length)
+    },
+    independent_provider_coverage: {
+      count: independentCount,
+      total: independentTotal,
+      excluded_fake_sessions: fakeExcluded,
+      rate: rate(independentCount, independentTotal)
+    },
+    blocked_reasons: sortCounts(blockedReasons),
+    turn_elapsed_ms: {
+      overall: summarizeSamples(elapsedSamples),
+      by_adapter: Object.fromEntries([...elapsedByAdapter.entries()]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([adapter, samples]) => [adapter, summarizeSamples(samples)]))
+    },
+    adapter_health: {
+      codex: adapterHealthSummary(env, "codex"),
+      claude: adapterHealthSummary(env, "claude")
+    }
+  };
+}
+
+function elapsedTurnSamples(store, sessionId) {
+  if (!sessionId) return [];
+  let turns;
+  try {
+    turns = store.readTurns(sessionId);
+  } catch {
+    return [];
+  }
+  const samples = [];
+  for (let index = 1; index < turns.length; index += 1) {
+    const previous = Date.parse(turns[index - 1]?.at || "");
+    const current = Date.parse(turns[index]?.at || "");
+    if (!Number.isFinite(previous) || !Number.isFinite(current)) continue;
+    const ms = current - previous;
+    if (!Number.isFinite(ms) || ms < 0) continue;
+    samples.push({ adapter: turns[index]?.adapter || "unknown", ms });
+  }
+  return samples;
+}
+
+function adapterHealthSummary(env, adapter) {
+  const verdict = knownBadVerdict(env, adapter);
+  if (!verdict) return { status: "healthy" };
+  const expiresAt = verdict.expires_at || null;
+  const expiresMs = Date.parse(expiresAt || "");
+  return {
+    status: "known_bad",
+    category: verdict.category || "unknown",
+    reason: redact(verdict.reason || ""),
+    hint: verdict.hint ? redact(verdict.hint) : null,
+    expires_at: expiresAt,
+    ttl_ms: Number.isFinite(expiresMs) ? Math.max(0, expiresMs - Date.now()) : null
+  };
+}
+
+function summarizeSamples(samples) {
+  if (!samples.length) return { count: 0, mean: null, median: null };
+  const sorted = samples.slice().sort((a, b) => a - b);
+  const sum = sorted.reduce((total, value) => total + value, 0);
+  const middle = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 === 0
+    ? (sorted[middle - 1] + sorted[middle]) / 2
+    : sorted[middle];
+  return {
+    count: sorted.length,
+    mean: Math.round((sum / sorted.length) * 1000) / 1000,
+    median: Math.round(median * 1000) / 1000
+  };
+}
+
+function rate(count, total) {
+  if (!total) return 0;
+  return Math.round((count / total) * 1000000) / 1000000;
+}
+
+function sortCounts(counts) {
+  return Object.fromEntries(Object.entries(counts).sort(([left], [right]) => left.localeCompare(right)));
 }
 
 function parseResumeOverrides(args, io) {
@@ -729,11 +902,86 @@ function renderSetup(result) {
   return lines.join("\n");
 }
 
+function renderDoctor(report) {
+  const lines = [
+    "converge-loop doctor",
+    `sessions: ${report.sessions.total} (limit ${report.limit})`,
+    "",
+    "Statuses:"
+  ];
+  if (Object.keys(report.sessions.statuses).length) {
+    for (const [status, count] of Object.entries(report.sessions.statuses)) {
+      lines.push(`  ${status}: ${count}`);
+    }
+  } else {
+    lines.push("  none: 0");
+  }
+  lines.push(
+    "",
+    "Reliability:",
+    `  fallback rate: ${formatPercent(report.fallbacks.rate)} (${report.fallbacks.count}/${report.sessions.total})`,
+    `  timeout rate: ${formatPercent(report.timeouts.rate)} (${report.timeouts.count}/${report.sessions.total})`,
+    `  independent coverage: ${formatPercent(report.independent_provider_coverage.rate)} (${report.independent_provider_coverage.count}/${report.independent_provider_coverage.total}; fake excluded ${report.independent_provider_coverage.excluded_fake_sessions})`,
+    "",
+    "Fallback reasons:"
+  );
+  appendCountLines(lines, report.fallbacks.reasons);
+  lines.push("", "Blocked reasons:");
+  appendCountLines(lines, report.blocked_reasons);
+  lines.push("", "Elapsed turn duration:");
+  appendStatsLine(lines, "overall", report.turn_elapsed_ms.overall);
+  for (const [adapter, stats] of Object.entries(report.turn_elapsed_ms.by_adapter)) {
+    appendStatsLine(lines, adapter, stats);
+  }
+  lines.push("", "Adapter health:");
+  for (const adapter of ["codex", "claude"]) {
+    const health = report.adapter_health[adapter];
+    if (health.status === "healthy") {
+      lines.push(`  ${adapter}: healthy`);
+    } else {
+      lines.push(`  ${adapter}: ${health.category} known-bad, expires in ${formatDuration(health.ttl_ms)}`);
+      if (health.reason) lines.push(`    reason: ${health.reason}`);
+      if (health.hint) lines.push(`    hint: ${health.hint}`);
+    }
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
+function appendCountLines(lines, counts) {
+  if (!Object.keys(counts).length) {
+    lines.push("  none: 0");
+    return;
+  }
+  for (const [name, count] of Object.entries(counts)) {
+    lines.push(`  ${name}: ${count}`);
+  }
+}
+
+function appendStatsLine(lines, label, stats) {
+  if (!stats.count) {
+    lines.push(`  ${label}: no samples`);
+    return;
+  }
+  lines.push(`  ${label}: mean ${formatDuration(stats.mean)}, median ${formatDuration(stats.median)} (${stats.count} samples)`);
+}
+
+function formatPercent(value) {
+  return `${Math.round(value * 1000) / 10}%`;
+}
+
+function formatDuration(ms) {
+  if (ms === null || ms === undefined) return "unknown";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${Math.round((ms / 1000) * 10) / 10}s`;
+}
+
 function helpText() {
   return `Usage:
   converge-loop setup [--json] [--check-only] [--disable] [--smoke]
   converge-loop run [options]
   converge-loop status [session-id]
+  converge-loop doctor [--json] [--limit N]
   converge-loop result <session-id> [--export <path>] [--allow-versioned-export]
   converge-loop cancel <session-id>
   converge-loop resume <session-id> [--context <path>] [--artifact <path>] [--focus <text>]
