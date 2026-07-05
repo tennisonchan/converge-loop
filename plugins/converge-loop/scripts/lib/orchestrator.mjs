@@ -113,8 +113,11 @@ export async function runSession({ store, options, stdout, stderr = null, stdin 
     improvements.push(...priorControl.improvements);
     pushbacksRaised.push(...priorControl.pushbacks);
     opPoints.push(...priorControl.operator_intervention_points);
-    if (Array.isArray(priorTurn.evidence)) allEvidence.push(...priorTurn.evidence);
   }
+  // The evidence ledger is the superset of per-turn evidence plus
+  // orchestrator-produced entries (web fetches), so resume seeds from it:
+  // this keeps the session web-fetch budget durable across resumes.
+  allEvidence.push(...store.readEvidence(session.id));
   let noProgressCount = 0;
   let result = null;
 
@@ -680,6 +683,9 @@ async function fetchWebUrl(rawUrl, env) {
         continue;
       }
       if (!response.ok) {
+        try {
+          await response.body?.cancel?.();
+        } catch {}
         return { ok: false, url: current, reason: `HTTP ${response.status}` };
       }
       let text = "";
@@ -688,11 +694,13 @@ async function fetchWebUrl(rawUrl, env) {
         const reader = response.body?.getReader?.();
         if (reader) {
           const decoder = new TextDecoder();
+          let bytes = 0;
           for (;;) {
             const { done, value } = await reader.read();
             if (done) break;
+            bytes += value.byteLength;
             text += decoder.decode(value, { stream: true });
-            if (text.length >= WEB_FETCH_BYTE_CAP) {
+            if (bytes >= WEB_FETCH_BYTE_CAP) {
               truncated = true;
               try {
                 await reader.cancel();
@@ -742,7 +750,7 @@ async function fetchSharedWeb({ requests, webMaterials, attemptsSoFar = 0, parti
   for (const skipped of unique.slice(budget)) {
     results.push({
       material: null,
-      evidence: { ...baseEvidence(), url: String(skipped), detail: "skipped: web fetch budget exhausted", hash: null }
+      evidence: { ...baseEvidence(), kind: "web_fetch_skipped", url: String(skipped), detail: "skipped: web fetch budget exhausted", hash: null }
     });
   }
   for (const rawUrl of unique.slice(0, budget)) {
