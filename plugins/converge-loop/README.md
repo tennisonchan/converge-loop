@@ -53,9 +53,11 @@ Setup controls:
 
 - `converge-loop setup --check-only`: run executable, flag, and auth-status checks without writing config or calling models.
 - `converge-loop setup --disable`: disable config-backed local adapters.
-- `converge-loop setup --smoke`: after normal readiness passes, run a tiny real Codex + Claude adapter exchange before enabling config. This can spend model calls.
+- `converge-loop setup`: after normal readiness passes, run a tiny real Codex + Claude adapter exchange before enabling config. This can spend model calls.
+- `converge-loop setup --no-smoke`: skip the live exchange and enable from readiness checks only; use this for deterministic CI or offline setup.
+- `converge-loop setup --smoke`: explicitly request the live exchange. This is also the default unless deterministic fake CLI mode is active.
 
-If the default opposite-agent path is unavailable, converge-loop may use the primary host adapter as a degraded fallback and will disclose that in the result. If the requested scope cannot be provided symmetrically, such as `--web shared` before shared web support is implemented, the run blocks instead of silently widening or changing access.
+If the default opposite-agent path is unavailable, converge-loop may use the primary host adapter as a degraded fallback and will disclose that in the result. Pass `converge-loop run --require-independent` to block instead of accepting degraded same-provider fallback when genuine independent provider coverage is required. If the requested scope cannot be provided symmetrically, such as `--web shared` before shared web support is implemented, the run blocks instead of silently widening or changing access.
 
 Use `converge-loop doctor [--json] [--limit N]` to inspect recent reliability from stored sessions without calling models or mutating state. It reports status counts, fallback and timeout rates over all included sessions, independent-provider coverage excluding fake-adapter sessions, blocked reasons, elapsed turn-duration stats, and the current adapter-health cache.
 

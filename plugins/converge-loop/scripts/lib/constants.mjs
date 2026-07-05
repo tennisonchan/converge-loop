@@ -48,5 +48,6 @@ export const DEFAULT_RUN_OPTIONS = Object.freeze({
   roles: null,
   background: false,
   json: false,
-  intervene: false
+  intervene: false,
+  requireIndependent: false
 });

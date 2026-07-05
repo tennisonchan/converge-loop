@@ -321,6 +321,9 @@ test("setup verifies local cli readiness and enables real adapters without env f
   assert.equal(setup.checks.claude.ok, true);
   assert.equal(setup.checks.codex.auth.ok, true);
   assert.equal(setup.checks.claude.auth.ok, true);
+  assert.equal(setup.smoke.requested, true);
+  assert.equal(setup.smoke.ok, true);
+  assert.deepEqual(setup.smoke.participants, ["codex", "claude"]);
   assert.ok(fs.existsSync(setup.config_path));
 
   const runHarness = io(stateRoot);
@@ -332,6 +335,39 @@ test("setup verifies local cli readiness and enables real adapters without env f
   const parsed = JSON.parse(runHarness.out.join(""));
   assert.equal(parsed.status, "agreed");
   assert.deepEqual(parsed.participants.map((participant) => participant.adapter), ["codex", "claude"]);
+});
+
+test("setup default smoke is skipped under fake local cli env to avoid model calls in CI", async () => {
+  const stateRoot = tempRoot("setup-default-fake-no-smoke");
+  const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"));
+  const harness = io(stateRoot);
+  harness.env.PATH = `${binDir}${path.delimiter}${harness.env.PATH || ""}`;
+  harness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE = "1";
+  const code = await runCli(["setup", "--json"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const setup = JSON.parse(harness.out.join(""));
+  assert.equal(setup.ok, true);
+  assert.equal(setup.enabled, true);
+  assert.equal(setup.smoke.requested, false);
+  assert.equal(setup.smoke.ok, null);
+  assert.ok(fs.existsSync(setup.config_path));
+});
+
+test("setup --no-smoke enables from readiness checks without a live exchange", async () => {
+  const stateRoot = tempRoot("setup-no-smoke");
+  const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"), { codexExecFail: true });
+  const harness = io(stateRoot);
+  harness.env.PATH = `${binDir}${path.delimiter}${harness.env.PATH || ""}`;
+  const code = await runCli(["setup", "--no-smoke", "--json"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const setup = JSON.parse(harness.out.join(""));
+  assert.equal(setup.ok, true);
+  assert.equal(setup.enabled, true);
+  assert.equal(setup.smoke.requested, false);
+  assert.equal(setup.smoke.ok, null);
+  const config = JSON.parse(fs.readFileSync(setup.config_path, "utf8"));
+  assert.equal(config.enabled, true);
+  assert.equal(config.smoke.requested, false);
 });
 
 test("setup --check-only reports readiness without writing config", async () => {
@@ -397,7 +433,8 @@ test("setup rejects incompatible control flags", async () => {
   for (const args of [
     ["setup", "--disable", "--check-only"],
     ["setup", "--disable", "--smoke"],
-    ["setup", "--check-only", "--smoke"]
+    ["setup", "--check-only", "--smoke"],
+    ["setup", "--smoke", "--no-smoke"]
   ]) {
     const result = await cli(args);
     assert.equal(result.code, 1);
@@ -518,6 +555,8 @@ test("setup --smoke fails closed instead of falling back when secondary adapter 
   assert.equal(setup.enabled, false);
   assert.equal(setup.smoke.ok, false);
   assert.match(setup.smoke.reason, /independent provider coverage/);
+  assert.match(setup.next_step, /Setup smoke failed/);
+  assert.match(setup.next_step, /--no-smoke/);
   assert.ok(setup.smoke.diagnostic_path);
   const config = JSON.parse(fs.readFileSync(setup.config_path, "utf8"));
   assert.equal(config.enabled, false);
@@ -535,6 +574,7 @@ test("setup --smoke refuses fake local cli turn shortcut", async () => {
   assert.equal(setup.ok, false);
   assert.equal(setup.enabled, false);
   assert.match(setup.smoke.reason, /cannot run with CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE/);
+  assert.match(setup.next_step, /Setup smoke failed/);
   assert.match(setup.warnings.join("\n"), /deterministic tests only/);
 });
 
@@ -695,6 +735,8 @@ test("help presents host-aware run example before fake adapter smoke paths", asy
   assert.match(result.stdout, /converge-loop setup/);
   assert.match(result.stdout, /converge-loop run --topic/);
   assert.match(result.stdout, /converge-loop doctor \[--json\] \[--limit N\]/);
+  assert.match(result.stdout, /--require-independent/);
+  assert.match(result.stdout, /--no-smoke/);
   assert.doesNotMatch(result.stdout, /CONVERGE_LOOP_HOST=akx/);
   assert.doesNotMatch(result.stdout, /fake-sequence,fake-sequence/);
 });
@@ -1031,6 +1073,62 @@ test("default opposite-agent preflight can fall back to degraded host participan
   assert.match(transcript, /degraded fallback/i);
 });
 
+test("run --require-independent blocks instead of using preflight degraded fallback", async () => {
+  const stateRoot = tempRoot("require-independent-preflight");
+  const harness = io(stateRoot);
+  harness.env.CONVERGE_LOOP_HOST = "codex";
+  harness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS = "1";
+  harness.env.CONVERGE_LOOP_ASSUME_LOCAL_CLI_PREFLIGHT = "1";
+  harness.env.CONVERGE_LOOP_TEST_UNAVAILABLE_ADAPTERS = "claude";
+  harness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE = "1";
+  const code = await runCli(["run", "--topic", "require independent", "--require-independent", "--json"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const parsed = JSON.parse(harness.out.join(""));
+  assert.equal(parsed.status, "blocked");
+  assert.equal(parsed.blocked_reason, "require_independent");
+  assert.equal(parsed.independent_provider_coverage, false);
+  assert.deepEqual(parsed.participants.map((participant) => participant.adapter), ["codex", "claude"]);
+  assert.deepEqual(parsed.fallbacks_used, []);
+  assert.match(parsed.summary, /independent provider coverage was required/i);
+  assert.match(parsed.summary, /claude adapter forced unavailable/);
+});
+
+test("run --require-independent with known-bad counterpart carries stored hint", async () => {
+  const health = await import("../scripts/lib/adapter-health.mjs");
+  const stateRoot = tempRoot("require-independent-known-bad");
+  const env = { CONVERGE_LOOP_STATE_HOME: stateRoot };
+  health.recordAdapterFailure(env, "claude", { category: "schema", reason: "invalid_json_schema", hint: "run setup --smoke" });
+  const harness = io(stateRoot);
+  harness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS = "1";
+  harness.env.CONVERGE_LOOP_ASSUME_LOCAL_CLI_PREFLIGHT = "1";
+  harness.env.CONVERGE_LOOP_HOST = "codex";
+  const code = await runCli(["run", "--topic", "known bad require independent", "--require-independent", "--json"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const parsed = JSON.parse(harness.out.join(""));
+  assert.equal(parsed.status, "blocked");
+  assert.equal(parsed.blocked_reason, "require_independent");
+  assert.deepEqual(parsed.fallbacks_used, []);
+  assert.match(parsed.summary, /recently failed \(schema\)/);
+  assert.match(parsed.summary, /run setup --smoke/);
+});
+
+test("run --require-independent blocks operator-forced same-provider pairing", async () => {
+  const stateRoot = tempRoot("require-independent-same-provider");
+  const harness = io(stateRoot);
+  harness.env.CONVERGE_LOOP_HOST = "codex";
+  harness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS = "1";
+  harness.env.CONVERGE_LOOP_ASSUME_LOCAL_CLI_PREFLIGHT = "1";
+  harness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE = "1";
+  const code = await runCli(["run", "--counterpart", "codex", "--topic", "same provider", "--require-independent", "--json"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const parsed = JSON.parse(harness.out.join(""));
+  assert.equal(parsed.status, "blocked");
+  assert.equal(parsed.blocked_reason, "require_independent");
+  assert.deepEqual(parsed.participants.map((participant) => participant.adapter), ["codex", "codex"]);
+  assert.deepEqual(parsed.fallbacks_used, []);
+  assert.match(parsed.summary, /selected participants do not provide independent provider coverage/);
+});
+
 test("doctor --json returns zeroed reliability stats for empty state", async () => {
   const result = await cli(["doctor", "--json"]);
   assert.equal(result.code, 0, result.stderr);
@@ -1074,7 +1172,7 @@ test("doctor aggregates mixed session reliability and excludes fake coverage fro
   const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"), { codexExecFail: true });
   const setupHarness = io(stateRoot);
   setupHarness.env.PATH = `${binDir}${path.delimiter}${setupHarness.env.PATH || ""}`;
-  code = await runCli(["setup", "--json"], setupHarness);
+  code = await runCli(["setup", "--no-smoke", "--json"], setupHarness);
   assert.equal(code, 0, setupHarness.err.join(""));
   const fallbackHarness = io(stateRoot);
   fallbackHarness.env.PATH = setupHarness.env.PATH;
@@ -1509,7 +1607,7 @@ test("invoke-time adapter failure swaps to the opposite adapter with degraded di
   const setupHarness = io(stateRoot);
   setupHarness.env.PATH = `${binDir}${path.delimiter}${setupHarness.env.PATH || ""}`;
   delete setupHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
-  const setupCode = await runCli(["setup", "--json"], setupHarness);
+  const setupCode = await runCli(["setup", "--no-smoke", "--json"], setupHarness);
   assert.equal(setupCode, 0, setupHarness.err.join(""));
   assert.equal(JSON.parse(setupHarness.out.join("")).enabled, true);
 
@@ -1527,6 +1625,50 @@ test("invoke-time adapter failure swaps to the opposite adapter with degraded di
   assert.equal(parsed.independent_provider_coverage, false);
   assert.match(parsed.summary, /degraded fallback/i);
   assert.equal(parsed.fake_coverage, false);
+});
+
+test("run --require-independent blocks instead of invoke-time degraded fallback", async () => {
+  const stateRoot = tempRoot("require-independent-invoke");
+  const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"), { codexExecFail: true });
+  const setupHarness = io(stateRoot);
+  setupHarness.env.PATH = `${binDir}${path.delimiter}${setupHarness.env.PATH || ""}`;
+  delete setupHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
+  const setupCode = await runCli(["setup", "--no-smoke", "--json"], setupHarness);
+  assert.equal(setupCode, 0, setupHarness.err.join(""));
+  assert.equal(JSON.parse(setupHarness.out.join("")).enabled, true);
+
+  const runHarness = io(stateRoot);
+  runHarness.env.PATH = setupHarness.env.PATH;
+  delete runHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
+  delete runHarness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS;
+  const runCode = await runCli(["run", "--topic", "invoke require independent", "--scope", "none", "--require-independent", "--json"], runHarness);
+  assert.equal(runCode, 0, runHarness.err.join(""));
+  const parsed = JSON.parse(runHarness.out.join(""));
+  assert.equal(parsed.status, "blocked");
+  assert.equal(parsed.blocked_reason, "require_independent");
+  assert.deepEqual(parsed.participants.map((participant) => participant.adapter), ["codex", "claude"]);
+  assert.deepEqual(parsed.fallbacks_used, []);
+  assert.doesNotMatch(parsed.summary, /degraded fallback/i);
+  assert.match(parsed.summary, /independent provider coverage was required/i);
+});
+
+test("background run --require-independent records a blocked result without degraded fallback", async () => {
+  const stateRoot = tempRoot("require-independent-background");
+  const harness = io(stateRoot);
+  harness.env.CONVERGE_LOOP_HOST = "codex";
+  harness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS = "1";
+  harness.env.CONVERGE_LOOP_ASSUME_LOCAL_CLI_PREFLIGHT = "1";
+  harness.env.CONVERGE_LOOP_TEST_UNAVAILABLE_ADAPTERS = "claude";
+  harness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE = "1";
+  const code = await runCli(["run", "--topic", "background require independent", "--require-independent", "--background"], harness);
+  assert.equal(code, 0, harness.err.join(""));
+  const sessionId = harness.out.join("").trim();
+  assert.match(sessionId, /^cl-/);
+  await waitFor(() => fs.existsSync(resultPath(stateRoot, sessionId)));
+  const parsed = readResult(stateRoot, sessionId);
+  assert.equal(parsed.status, "blocked");
+  assert.equal(parsed.blocked_reason, "require_independent");
+  assert.deepEqual(parsed.fallbacks_used, []);
 });
 
 test("per-attempt timeout blocks with adapter_failure reason and the session is resumable", async () => {
@@ -1631,7 +1773,7 @@ test("explicit participant selection never swaps to a fallback on invoke failure
   const setupHarness = io(stateRoot);
   setupHarness.env.PATH = `${binDir}${path.delimiter}${setupHarness.env.PATH || ""}`;
   delete setupHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
-  await runCli(["setup", "--json"], setupHarness);
+  await runCli(["setup", "--no-smoke", "--json"], setupHarness);
 
   const runHarness = io(stateRoot);
   runHarness.env.PATH = setupHarness.env.PATH;
@@ -1818,6 +1960,10 @@ test("result validation rejects self-contradictory results", async () => {
   assert.throws(() => validateResult({ ...base, remaining_disagreements: ["core"] }), /agreed result must not carry/);
   assert.throws(() => validateResult({ ...base, status: "bogus" }), /status must be one of/);
   assert.throws(() => validateResult({ ...base, blocked_reason: "adapter_failure" }), /only valid on blocked/);
+  const blocked = { ...base, status: "blocked", blocked_reason: "require_independent", remaining_disagreements: ["coverage required"] };
+  assert.equal(validateResult(blocked), blocked);
+  assert.throws(() => validateResult({ ...base, status: "agreed", blocked_reason: "require_independent" }), /only valid on blocked/);
+  assert.throws(() => validateResult({ ...base, status: "blocked", blocked_reason: "bogus" }), /blocked_reason must be one of/);
 });
 
 test("fake adapter results disclose fake coverage", async () => {
@@ -2297,7 +2443,7 @@ test("a deterministic invoke failure records known-bad and skips the same-adapte
   const setupHarness = io(stateRoot);
   setupHarness.env.PATH = `${binDir}${path.delimiter}${setupHarness.env.PATH || ""}`;
   delete setupHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
-  await runCli(["setup", "--json"], setupHarness);
+  await runCli(["setup", "--no-smoke", "--json"], setupHarness);
 
   const runHarness = io(stateRoot);
   runHarness.env.PATH = setupHarness.env.PATH;
@@ -2350,7 +2496,7 @@ test("a transient invoke failure is not remembered as known-bad", async () => {
   const setupHarness = io(stateRoot);
   setupHarness.env.PATH = `${binDir}${path.delimiter}${setupHarness.env.PATH || ""}`;
   delete setupHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
-  await runCli(["setup", "--json"], setupHarness);
+  await runCli(["setup", "--no-smoke", "--json"], setupHarness);
   const runHarness = io(stateRoot);
   runHarness.env.PATH = setupHarness.env.PATH;
   delete runHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;

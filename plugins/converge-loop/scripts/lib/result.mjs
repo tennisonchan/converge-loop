@@ -4,6 +4,7 @@ const BLOCKED_REASONS = new Set([
   "preflight",
   "adapter_failure",
   "enforcement_violation",
+  "require_independent",
   "no_progress",
   "participant_declared",
   "unknown"
