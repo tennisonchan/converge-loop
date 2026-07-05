@@ -52,6 +52,17 @@ export class StateStore {
     return session;
   }
 
+  readJsonlTolerant(file) {
+    if (!fs.existsSync(file)) return [];
+    return fs.readFileSync(file, "utf8").split(/\n/).filter(Boolean).flatMap((line) => {
+      try {
+        return [JSON.parse(line)];
+      } catch {
+        return [];
+      }
+    });
+  }
+
   sessionPath(sessionId) {
     return path.join(this.sessionsRoot, sessionId);
   }
@@ -95,15 +106,7 @@ export class StateStore {
   }
 
   readOperatorInputs(sessionId) {
-    const file = this.sessionFile(sessionId, "operator-inputs.jsonl");
-    if (!fs.existsSync(file)) return [];
-    return fs.readFileSync(file, "utf8").split(/\n/).filter(Boolean).flatMap((line) => {
-      try {
-        return [JSON.parse(line)];
-      } catch {
-        return [];
-      }
-    });
+    return this.readJsonlTolerant(this.sessionFile(sessionId, "operator-inputs.jsonl"));
   }
 
   appendWebMaterial(sessionId, material) {
@@ -114,27 +117,11 @@ export class StateStore {
   }
 
   readWebMaterials(sessionId) {
-    const file = this.sessionFile(sessionId, "web-materials.jsonl");
-    if (!fs.existsSync(file)) return [];
-    return fs.readFileSync(file, "utf8").split(/\n/).filter(Boolean).flatMap((line) => {
-      try {
-        return [JSON.parse(line)];
-      } catch {
-        return [];
-      }
-    });
+    return this.readJsonlTolerant(this.sessionFile(sessionId, "web-materials.jsonl"));
   }
 
   readEvidence(sessionId) {
-    const file = this.sessionFile(sessionId, "evidence-ledger.jsonl");
-    if (!fs.existsSync(file)) return [];
-    return fs.readFileSync(file, "utf8").split(/\n/).filter(Boolean).flatMap((line) => {
-      try {
-        return [JSON.parse(line)];
-      } catch {
-        return [];
-      }
-    });
+    return this.readJsonlTolerant(this.sessionFile(sessionId, "evidence-ledger.jsonl"));
   }
 
   writeConclusion(sessionId, text) {
