@@ -1907,6 +1907,74 @@ test("shared web refuses private hosts and records the refusal as evidence", asy
   assert.match(refusals[1].detail, /unsupported protocol/);
 });
 
+test("shared web enforces the per-turn cap and validates redirect hops", async () => {
+  const http = await import("node:http");
+  const server = http.createServer((req, res) => {
+    if (req.url === "/redirect-private") {
+      res.writeHead(302, { location: "file:///etc/passwd" });
+      res.end();
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end("OK " + req.url);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  try {
+    const stateRoot = tempRoot("web-caps");
+    const base = `http://127.0.0.1:${port}`;
+    const fixture = writeFixture(stateRoot, {
+      turns: [
+        { message: "many fetches", control: { status: "continue", web_fetch_requests: [`${base}/a`, `${base}/b`, `${base}/c`, `${base}/d`, `${base}/redirect-private`], ready_to_converge: false } },
+        { message: "ok", control: { status: "agreed", ready_to_converge: true } },
+        { message: "ok", control: { status: "agreed", ready_to_converge: true } }
+      ]
+    });
+    const harness = io(stateRoot);
+    harness.env.CONVERGE_LOOP_TEST_ALLOW_LOCAL_WEB = "1";
+    const code = await runCli(["run", "--fake-adapters", "fake-replay,fake-replay", "--topic", "caps", "--web", "shared", "--fixture", fixture, "--json"], harness);
+    assert.equal(code, 0, harness.err.join(""));
+    const sessionId = findSingleSessionId(stateRoot);
+    const evidence = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "evidence-ledger.jsonl"), "utf8")
+      .trim().split(/\n/).map((line) => JSON.parse(line)).filter((item) => item.kind === "web_fetch");
+    assert.equal(evidence.length, 5, "every request accounted for");
+    const skipped = evidence.filter((item) => /budget exhausted/.test(item.detail));
+    assert.equal(skipped.length, 2, "requests beyond the per-turn cap are skipped");
+    const fetchedOk = evidence.filter((item) => /HTTP 200/.test(item.detail));
+    assert.equal(fetchedOk.length, 3, "per-turn cap of 3 honored");
+    const materials = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "web-materials.jsonl"), "utf8")
+      .trim().split(/\n/).map((line) => JSON.parse(line));
+    assert.equal(materials.length, 3);
+  } finally {
+    server.close();
+  }
+});
+
+test("blocked web hosts include IPv6-mapped and trailing-dot bypass forms", async () => {
+  const { buildTurnPrompt: _unused } = await import("../scripts/lib/orchestrator.mjs");
+  const stateRoot = tempRoot("web-bypass");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      { message: "bypass attempts", control: { status: "continue", web_fetch_requests: ["http://[::ffff:127.0.0.1]/x", "http://localhost./x", "http://[fe80::1]/x", "http://100.64.0.1/x"], ready_to_converge: false } },
+      { message: "ok", control: { status: "agreed", ready_to_converge: true } },
+      { message: "ok", control: { status: "agreed", ready_to_converge: true } }
+    ]
+  });
+  const result = await cliFakes("fake-replay,fake-replay", [
+    "--topic", "bypass",
+    "--web", "shared",
+    "--fixture", fixture,
+    "--json"
+  ], stateRoot);
+  assert.equal(result.code, 0, result.stderr);
+  const sessionId = findSingleSessionId(stateRoot);
+  assert.ok(!fs.existsSync(path.join(stateRoot, "sessions", sessionId, "web-materials.jsonl")), "no bypass fetched material");
+  const evidence = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "evidence-ledger.jsonl"), "utf8")
+    .trim().split(/\n/).map((line) => JSON.parse(line)).filter((item) => item.kind === "web_fetch");
+  const refused = evidence.filter((item) => /private or loopback/.test(item.detail));
+  assert.equal(refused.length, 3, "loopback/link-local/CGNAT literals refused");
+});
+
 test("turn prompt renders shared web material and instructions", () => {
   const prompt = buildTurnPrompt({
     options: { topic: "t", scope: "none", web: "shared", cwd: "/repo" },
