@@ -658,14 +658,18 @@ function validateWebUrl(raw, env) {
 // evidence. Redirects are followed manually so every hop is validated.
 async function fetchWebUrl(rawUrl, env) {
   let current = rawUrl;
+  // One 15s budget covers the whole redirect chain, not 15s per hop.
+  const overallDeadline = Date.now() + WEB_FETCH_TIMEOUT_MS;
   for (let hop = 0; hop < 4; hop += 1) {
     const check = validateWebUrl(current, env);
     if (!check.ok) return { ok: false, url: current, reason: check.reason };
+    const remaining = overallDeadline - Date.now();
+    if (remaining <= 0) return { ok: false, url: current, reason: "fetch timeout exhausted across redirects" };
     const controller = new AbortController();
     // The timer stays armed through the body read so a slow-loris response
     // cannot outlive the documented timeout; the byte cap is enforced while
     // streaming so an oversized body never fully buffers.
-    const timer = setTimeout(() => controller.abort(), WEB_FETCH_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), remaining);
     try {
       let response;
       try {
@@ -731,7 +735,7 @@ async function fetchWebUrl(rawUrl, env) {
 }
 
 async function fetchSharedWeb({ requests, webMaterials, attemptsSoFar = 0, participant, turnIndex, env }) {
-  const seen = new Set(webMaterials.map((item) => item.url));
+  const seen = new Set(webMaterials.flatMap((item) => [item.url, item.requested_url].filter(Boolean)));
   const results = [];
   const unique = dedupe(requests).filter((url) => !seen.has(String(url)));
   // Failed attempts count against the session budget too, so refused hosts
@@ -767,6 +771,7 @@ async function fetchSharedWeb({ requests, webMaterials, attemptsSoFar = 0, parti
         at: nowIso(),
         turn_index: turnIndex,
         requested_by: participant.id,
+        requested_url: String(rawUrl),
         url: fetched.url,
         truncated: Boolean(fetched.truncated),
         content: fetched.content

@@ -2013,6 +2013,55 @@ test("blocked web hosts include IPv6-mapped and trailing-dot bypass forms", asyn
   assert.equal(refused.length, 3, "loopback/link-local/CGNAT literals refused");
 });
 
+test("the session web fetch budget survives resume", async () => {
+  const http = await import("node:http");
+  const server = http.createServer((req, res) => { res.writeHead(200); res.end("ok"); });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  try {
+    const stateRoot = tempRoot("web-budget-resume");
+    const base = `http://127.0.0.1:${port}`;
+    const fixture = writeFixture(stateRoot, {
+      turns: [
+        { message: "park", control: { status: "needs_evidence", evidence_requests: ["more"], ready_to_converge: true } },
+        { message: "spend", control: { status: "continue", web_fetch_requests: [`${base}/after-resume`], ready_to_converge: false } },
+        { message: "ok", control: { status: "agreed", ready_to_converge: true } },
+        { message: "ok", control: { status: "agreed", ready_to_converge: true } }
+      ]
+    });
+    const harness = io(stateRoot);
+    harness.env.CONVERGE_LOOP_TEST_ALLOW_LOCAL_WEB = "1";
+    const runCode = await runCli(["run", "--fake-adapters", "fake-replay,fake-replay", "--topic", "budget", "--web", "shared", "--fixture", fixture, "--json"], harness);
+    assert.equal(runCode, 0, harness.err.join(""));
+    const sessionId = findSingleSessionId(stateRoot);
+    // Simulate a prior session that already spent the whole 12-attempt budget.
+    const ledgerPath = path.join(stateRoot, "sessions", sessionId, "evidence-ledger.jsonl");
+    const spent = Array.from({ length: 12 }, (_, index) => JSON.stringify({
+      schema_version: "converge-loop.evidence.v1",
+      at: new Date().toISOString(),
+      turn_index: 0,
+      participant_id: "p1",
+      participant_role: "proposer",
+      source: "observed",
+      kind: "web_fetch",
+      url: `${base}/spent-${index}`,
+      detail: "HTTP 200, 2 chars",
+      hash: null
+    })).join("\n");
+    fs.appendFileSync(ledgerPath, `${spent}\n`);
+    const resumeHarness = io(stateRoot);
+    resumeHarness.env.CONVERGE_LOOP_TEST_ALLOW_LOCAL_WEB = "1";
+    const resumeCode = await runCli(["resume", sessionId, "--fixture", fixture, "--json"], resumeHarness);
+    assert.equal(resumeCode, 0, resumeHarness.err.join(""));
+    const evidence = fs.readFileSync(ledgerPath, "utf8").trim().split(/\n/).map((line) => JSON.parse(line));
+    const skips = evidence.filter((item) => item.kind === "web_fetch_skipped");
+    assert.equal(skips.length, 1, "post-resume request is budget-skipped because prior attempts persist");
+    assert.ok(!fs.existsSync(path.join(stateRoot, "sessions", sessionId, "web-materials.jsonl")), "no fetch happened after the budget was exhausted");
+  } finally {
+    server.close();
+  }
+});
+
 test("turn prompt renders shared web material and instructions", () => {
   const prompt = buildTurnPrompt({
     options: { topic: "t", scope: "none", web: "shared", cwd: "/repo" },
