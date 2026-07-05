@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { EVIDENCE_SCHEMA, JOB_SCHEMA, OPERATOR_INPUT_SCHEMA, SESSION_SCHEMA, TURN_SCHEMA } from "./constants.mjs";
+import { EVIDENCE_SCHEMA, JOB_SCHEMA, OPERATOR_INPUT_SCHEMA, SESSION_SCHEMA, TURN_SCHEMA, WEB_MATERIAL_SCHEMA } from "./constants.mjs";
 import { validateResult } from "./result.mjs";
 import {
   appendFile,
@@ -96,6 +96,25 @@ export class StateStore {
 
   readOperatorInputs(sessionId) {
     const file = this.sessionFile(sessionId, "operator-inputs.jsonl");
+    if (!fs.existsSync(file)) return [];
+    return fs.readFileSync(file, "utf8").split(/\n/).filter(Boolean).flatMap((line) => {
+      try {
+        return [JSON.parse(line)];
+      } catch {
+        return [];
+      }
+    });
+  }
+
+  appendWebMaterial(sessionId, material) {
+    appendJsonl(this.sessionFile(sessionId, "web-materials.jsonl"), {
+      schema_version: WEB_MATERIAL_SCHEMA,
+      ...material
+    });
+  }
+
+  readWebMaterials(sessionId) {
+    const file = this.sessionFile(sessionId, "web-materials.jsonl");
     if (!fs.existsSync(file)) return [];
     return fs.readFileSync(file, "utf8").split(/\n/).filter(Boolean).flatMap((line) => {
       try {

@@ -992,17 +992,18 @@ test("agreed on the first participant turn still waits for the second participan
   assert.equal(parsed.turn_count, 2);
 });
 
-test("local cli adapter preflight can be exercised without enabling unsafe execution", async () => {
+test("local cli adapters accept shared web scope with orchestrator mediation", async () => {
   const stateRoot = tempRoot("local-preflight");
   const harness = io(stateRoot);
   harness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS = "1";
   harness.env.CONVERGE_LOOP_ASSUME_LOCAL_CLI_PREFLIGHT = "1";
+  harness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE = "1";
   harness.env.CONVERGE_LOOP_HOST = "codex";
   const result = await runCli(["run", "--counterpart", "claude", "--topic", "preflight", "--web", "shared", "--json"], harness);
-  assert.equal(result, 0);
+  assert.equal(result, 0, harness.err.join(""));
   const parsed = JSON.parse(harness.out.join(""));
-  assert.equal(parsed.status, "blocked");
-  assert.match(parsed.summary, /shared web adapter execution is not implemented/);
+  assert.equal(parsed.status, "agreed");
+  assert.equal(parsed.web_scope, "shared");
 });
 
 test("default opposite-agent preflight can fall back to degraded host participant", async () => {
@@ -1043,17 +1044,20 @@ test("explicit participant selection does not use degraded fallback implicitly",
   assert.equal(parsed.fallbacks_used.length, 0);
 });
 
-test("shared web remains fail-closed under current local adapter capabilities", async () => {
-  const stateRoot = tempRoot("shared-web-block");
+test("shared web works with degraded fallback coverage", async () => {
+  const stateRoot = tempRoot("shared-web-fallback");
   const harness = io(stateRoot);
   harness.env.CONVERGE_LOOP_ENABLE_LOCAL_CLI_ADAPTERS = "1";
   harness.env.CONVERGE_LOOP_ASSUME_LOCAL_CLI_PREFLIGHT = "1";
   harness.env.CONVERGE_LOOP_TEST_UNAVAILABLE_ADAPTERS = "claude";
+  harness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE = "1";
+  harness.env.CONVERGE_LOOP_HOST = "codex";
   const code = await runCli(["run", "--topic", "shared web", "--web", "shared", "--json"], harness);
   assert.equal(code, 0, harness.err.join(""));
   const parsed = JSON.parse(harness.out.join(""));
-  assert.equal(parsed.status, "blocked");
-  assert.match(parsed.summary, /shared web adapter execution is not implemented/);
+  assert.equal(parsed.status, "agreed");
+  assert.equal(parsed.web_scope, "shared");
+  assert.match(parsed.summary, /degraded fallback/i);
 });
 
 test("status reports a starting job before session files exist", async () => {
@@ -1833,6 +1837,93 @@ test("jobs advisory lock: ownership, throw-release, stale break, and timeout saf
   assert.ok(Date.now() - before >= 1900, "waited for the acquisition deadline");
   assert.ok(fs.existsSync(lockDir), "foreign lock preserved after timeout");
   fs.rmdirSync(lockDir);
+});
+
+test("shared web fetches requested URLs, logs observed evidence, and shares content", async () => {
+  const http = await import("node:http");
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end("WEB EVIDENCE CONTENT for " + req.url);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  try {
+    const stateRoot = tempRoot("shared-web-fetch");
+    const url = `http://127.0.0.1:${port}/usage-stats`;
+    const fixture = writeFixture(stateRoot, {
+      turns: [
+        { message: "fetch the stats", control: { status: "continue", web_fetch_requests: [url], ready_to_converge: false } },
+        { message: "reviewed", control: { status: "agreed", agreements: ["stats support it"], ready_to_converge: true } },
+        { message: "confirmed", control: { status: "agreed", ready_to_converge: true } }
+      ]
+    });
+    const harness = io(stateRoot);
+    harness.env.CONVERGE_LOOP_TEST_ALLOW_LOCAL_WEB = "1";
+    const code = await runCli(["run", "--fake-adapters", "fake-replay,fake-replay", "--topic", "web", "--web", "shared", "--fixture", fixture, "--json"], harness);
+    assert.equal(code, 0, harness.err.join(""));
+    const parsed = JSON.parse(harness.out.join(""));
+    assert.equal(parsed.status, "agreed");
+    const sessionId = findSingleSessionId(stateRoot);
+    const materials = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "web-materials.jsonl"), "utf8")
+      .trim().split(/\n/).map((line) => JSON.parse(line));
+    assert.equal(materials.length, 1);
+    assert.match(materials[0].content, /WEB EVIDENCE CONTENT/);
+    const evidence = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "evidence-ledger.jsonl"), "utf8")
+      .trim().split(/\n/).map((line) => JSON.parse(line));
+    const webEvidence = evidence.filter((item) => item.kind === "web_fetch");
+    assert.equal(webEvidence.length, 1);
+    assert.equal(webEvidence[0].source, "observed");
+    assert.match(webEvidence[0].detail, /HTTP 200/);
+    assert.ok(webEvidence[0].hash, "observed web evidence carries a content hash");
+    assert.equal(parsed.evidence_summary.observed.length >= 1, true);
+  } finally {
+    server.close();
+  }
+});
+
+test("shared web refuses private hosts and records the refusal as evidence", async () => {
+  const stateRoot = tempRoot("shared-web-ssrf");
+  const fixture = writeFixture(stateRoot, {
+    turns: [
+      { message: "fetch internal", control: { status: "continue", web_fetch_requests: ["http://127.0.0.1:9/metadata", "file:///etc/passwd"], ready_to_converge: false } },
+      { message: "ok", control: { status: "agreed", ready_to_converge: true } },
+      { message: "ok", control: { status: "agreed", ready_to_converge: true } }
+    ]
+  });
+  const result = await cliFakes("fake-replay,fake-replay", [
+    "--topic", "ssrf",
+    "--web", "shared",
+    "--fixture", fixture,
+    "--json"
+  ], stateRoot);
+  assert.equal(result.code, 0, result.stderr);
+  const sessionId = findSingleSessionId(stateRoot);
+  assert.ok(!fs.existsSync(path.join(stateRoot, "sessions", sessionId, "web-materials.jsonl")), "no material for refused fetches");
+  const evidence = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "evidence-ledger.jsonl"), "utf8")
+    .trim().split(/\n/).map((line) => JSON.parse(line));
+  const refusals = evidence.filter((item) => item.kind === "web_fetch");
+  assert.equal(refusals.length, 2);
+  assert.match(refusals[0].detail, /private or loopback/);
+  assert.match(refusals[1].detail, /unsupported protocol/);
+});
+
+test("turn prompt renders shared web material and instructions", () => {
+  const prompt = buildTurnPrompt({
+    options: { topic: "t", scope: "none", web: "shared", cwd: "/repo" },
+    participant: { id: "p2", adapter: "claude", role: "critic" },
+    participants: [
+      { id: "p1", adapter: "codex", role: "proposer" },
+      { id: "p2", adapter: "claude", role: "critic" }
+    ],
+    transcript: [],
+    nonce: "abc123",
+    controlMode: "nonce-block",
+    webMaterials: [{ url: "https://example.com/spec", content: "SPEC BODY", truncated: false }]
+  });
+  assert.match(prompt, /Shared web material/);
+  assert.match(prompt, /BEGIN WEB https:\/\/example\.com\/spec/);
+  assert.match(prompt, /SPEC BODY/);
+  assert.match(prompt, /web_fetch_requests/);
 });
 
 function findSingleSessionId(stateRoot) {

@@ -200,7 +200,9 @@ File scope is controlled by `--scope`:
 Web scope is controlled by `--web`:
 
 - `off`: no web/search/fetch tools are available to either participant. Provider-native web features must be disabled or the adapter cannot participate.
-- `shared`: both participants use the same orchestrator-provided web search/fetch tool with the same query limits, URL allow/deny policy, timeout, and evidence logging. Provider-native web features remain disabled so one provider cannot silently use broader web access.
+- `shared`: both participants use the same orchestrator-mediated web access with the same limits, URL policy, timeout, and evidence logging. Provider-native web features remain disabled so one provider cannot silently use broader web access.
+
+Shared web v1 is fetch-only and mediated between turns rather than through an in-turn tool bridge (one-shot local CLI participants cannot call back into the orchestrator mid-turn). Participants list public http(s) URLs in the `web_fetch_requests` control field; after the turn, the orchestrator fetches them under identical caps for everyone (per-turn and per-session limits, byte cap, timeout, manual redirect validation, private/loopback hosts rejected), records observed evidence entries with content hashes, persists the fetched content to `web-materials.jsonl`, and includes it in every subsequent turn prompt as shared material. Web search (queries) is deferred until a search provider exists; participants express search needs as fetches of known URLs or as `evidence_requests` for the operator.
 
 If one adapter cannot support the same file or web scope as the other, the orchestrator either downgrades both participants to the shared subset when the operator did not explicitly request the unavailable scope, or stops as `blocked` when the requested scope cannot be honored symmetrically.
 
@@ -376,6 +378,7 @@ Each session directory contains:
 - `evidence-ledger.jsonl`: file and web evidence each participant cited or requested.
 - `conclusion.md`: final synthesized result when available.
 - `operator-inputs.jsonl`: operator answers captured during `--intervene` pauses; included in subsequent turn prompts as authoritative preference input.
+- `web-materials.jsonl`: shared web content fetched by the orchestrator under `--web shared`; included in all subsequent turn prompts.
 - `result.json`: normalized final status.
 
 Every persisted JSON object carries a schema version:
@@ -384,6 +387,7 @@ Every persisted JSON object carries a schema version:
 - each `turns.jsonl` record: `schema_version: "converge-loop.turn.v1"`
 - each `evidence-ledger.jsonl` record: `schema_version: "converge-loop.evidence.v1"`
 - each `operator-inputs.jsonl` record: `schema_version: "converge-loop.operator-input.v1"`
+- each `web-materials.jsonl` record: `schema_version: "converge-loop.web-material.v1"`
 - `jobs/<session-id>.json`: `schema_version: "converge-loop.job.v1"`
 - `result.json`: `schema_version: "converge-loop.result.v1"`
 

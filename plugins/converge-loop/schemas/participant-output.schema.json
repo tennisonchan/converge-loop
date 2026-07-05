@@ -28,7 +28,8 @@
         "concessions",
         "ready_to_converge",
         "operator_intervention_points",
-        "next_prompt_suggestion"
+        "next_prompt_suggestion",
+        "web_fetch_requests"
       ],
       "properties": {
         "status": {
@@ -110,6 +111,13 @@
         },
         "next_prompt_suggestion": {
           "type": "string"
+        },
+        "web_fetch_requests": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "http(s) URLs the orchestrator should fetch and share with all participants before the next turn (only honored when web scope is shared)."
         }
       }
     }
