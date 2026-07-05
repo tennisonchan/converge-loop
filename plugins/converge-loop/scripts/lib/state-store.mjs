@@ -173,6 +173,38 @@ export class StateStore {
     }).sort((a, b) => String(b.session.updated_at).localeCompare(String(a.session.updated_at)));
   }
 
+  // Advisory lock (design plan jobs/lock): serializes job-state writes so a
+  // cancel cannot race a heartbeat read-modify-write. mkdir is atomic; a lock
+  // older than 5s is treated as abandoned and broken.
+  withJobsLock(fn) {
+    const lockDir = path.join(this.jobsRoot, "lock");
+    const deadline = Date.now() + 2000;
+    for (;;) {
+      try {
+        fs.mkdirSync(lockDir);
+        break;
+      } catch {
+        try {
+          const age = Date.now() - fs.statSync(lockDir).mtimeMs;
+          if (age > 5000) {
+            fs.rmdirSync(lockDir);
+            continue;
+          }
+        } catch {}
+        if (Date.now() > deadline) break; // proceed unlocked rather than deadlock
+        const wait = Date.now() + 25;
+        while (Date.now() < wait) {} // short spin; job writes are rare and tiny
+      }
+    }
+    try {
+      return fn();
+    } finally {
+      try {
+        fs.rmdirSync(lockDir);
+      } catch {}
+    }
+  }
+
   writeJob(sessionId, job) {
     writeJson(path.join(this.jobsRoot, `${sessionId}.json`), {
       schema_version: JOB_SCHEMA,

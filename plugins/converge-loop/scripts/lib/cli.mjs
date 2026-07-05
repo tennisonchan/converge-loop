@@ -337,8 +337,8 @@ async function runRun(args, io) {
   } finally {
     process.removeListener("SIGTERM", abortOnSignal);
     process.removeListener("SIGINT", abortOnSignal);
+    finalizeJob(store, options.sessionId, result);
   }
-  finalizeJob(store, options.sessionId, result);
   return 0;
 }
 
@@ -362,10 +362,14 @@ function writeForegroundJob(store, sessionId, options, io, mode) {
 
 function finalizeJob(store, sessionId, result) {
   if (!sessionId) return;
-  const job = store.loadJob(sessionId);
-  if (!job) return;
-  const status = result?.status === "canceled" ? "canceled" : "completed";
-  store.writeJob(sessionId, { ...job, status, last_heartbeat_at: nowIso() });
+  store.withJobsLock(() => {
+    const job = store.loadJob(sessionId);
+    if (!job) return;
+    // No result means runSession threw: record failed instead of leaving the
+    // record running forever.
+    const status = result ? (result.status === "canceled" ? "canceled" : "completed") : "failed";
+    store.writeJob(sessionId, { ...job, status, last_heartbeat_at: nowIso() });
+  });
 }
 
 function startBackgroundRun(originalArgs, options, io, store) {
@@ -445,19 +449,32 @@ function runResult(args, io) {
 }
 
 function runCancel(args, io) {
+  assertNotParticipant(io.env);
   if (!args[0]) throw new Error("cancel requires <session-id>");
   const sessionId = args[0];
   const store = StateStore.fromEnv(io.env);
   const job = store.loadJob(sessionId);
   if (!job) throw new Error(`no background job found for ${sessionId}`);
-  if (processExists(job.pid)) {
+  // Pid-reuse guard: only signal when the record still claims to be live AND
+  // the heartbeat is fresh; a dead session whose pid was recycled by an
+  // unrelated process has a stale heartbeat and must not be killed.
+  const liveStatus = ["starting", "running", "canceling"].includes(job.status);
+  const heartbeatAge = Date.now() - Date.parse(job.last_heartbeat_at || job.created_at || 0);
+  const heartbeatFresh = Number.isFinite(heartbeatAge) && heartbeatAge < (job.turn_timeout_seconds || 180) * 2000;
+  if (liveStatus && heartbeatFresh && processExists(job.pid)) {
     signalProcessTree(job.pid, "SIGTERM");
     ensureCanceledResult({ store, sessionId, job, env: io.env });
-    store.writeJob(sessionId, { ...job, status: "canceling", last_heartbeat_at: nowIso() });
+    store.withJobsLock(() => {
+      const current = store.loadJob(sessionId) || job;
+      store.writeJob(sessionId, { ...current, status: "canceling", last_heartbeat_at: nowIso() });
+    });
     io.stdout.write(`${sessionId} canceling\n`);
   } else {
     ensureCanceledResult({ store, sessionId, job, env: io.env });
-    store.writeJob(sessionId, { ...job, status: "stale", last_heartbeat_at: nowIso() });
+    store.withJobsLock(() => {
+      const current = store.loadJob(sessionId) || job;
+      store.writeJob(sessionId, { ...current, status: "stale", last_heartbeat_at: nowIso() });
+    });
     io.stdout.write(`${sessionId} stale\n`);
   }
   return 0;
@@ -500,8 +517,12 @@ async function runResume(args, io) {
   const overrides = parseResumeOverrides(args.slice(1), io);
   const options = { ...session.options, ...overrides, sessionId };
   writeForegroundJob(store, sessionId, options, io, "resume");
-  const resumedResult = await runSession({ store, options, stdout: io.stdout, stderr: io.stderr, stdin: io.stdin || null, env: io.env, sessionId, resume: true, resumeOverrides: overrides });
-  finalizeJob(store, sessionId, resumedResult);
+  let resumedResult;
+  try {
+    resumedResult = await runSession({ store, options, stdout: io.stdout, stderr: io.stderr, stdin: io.stdin || null, env: io.env, sessionId, resume: true, resumeOverrides: overrides });
+  } finally {
+    finalizeJob(store, sessionId, resumedResult);
+  }
   return 0;
 }
 

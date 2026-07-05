@@ -1756,6 +1756,51 @@ test("turn prompt carries prior operator input", () => {
   assert.match(prompt, /operator answered: use sqlite/);
 });
 
+test("unexpected run failure finalizes the job record as failed", async () => {
+  const stateRoot = tempRoot("job-failed");
+  const sessionId = "forced-failure";
+  fs.mkdirSync(path.join(stateRoot, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(stateRoot, "sessions", sessionId), "not a directory");
+  const result = await cli([
+    "run",
+    "--fake-adapters", "fake-sequence,fake-sequence",
+    "--topic", "forced failure",
+    "--session-id", sessionId,
+    "--json"
+  ], stateRoot);
+  assert.equal(result.code, 1);
+  const job = JSON.parse(fs.readFileSync(path.join(stateRoot, "jobs", `${sessionId}.json`), "utf8"));
+  assert.equal(job.status, "failed");
+});
+
+test("cancel refuses to run from inside a participant turn", async () => {
+  const harness = io(tempRoot("cancel-sentinel"));
+  harness.env.CONVERGE_LOOP_PARTICIPANT = "1";
+  const code = await runCli(["cancel", "whatever"], harness);
+  assert.equal(code, 1);
+  assert.match(harness.err.join(""), /cannot be invoked from inside a converge-loop participant turn/);
+});
+
+test("cancel does not signal a live pid whose job heartbeat is stale", async () => {
+  const stateRoot = tempRoot("pid-reuse");
+  fs.mkdirSync(path.join(stateRoot, "jobs"), { recursive: true });
+  fs.writeFileSync(path.join(stateRoot, "jobs", "reused.json"), JSON.stringify({
+    schema_version: "converge-loop.job.v1",
+    id: "reused",
+    pid: process.pid,
+    command: [],
+    cwd: repoRoot,
+    created_at: new Date(Date.now() - 3600_000).toISOString(),
+    last_heartbeat_at: new Date(Date.now() - 3600_000).toISOString(),
+    status: "running",
+    session_path: path.join(stateRoot, "sessions", "reused"),
+    turn_timeout_seconds: 180
+  }));
+  const cancel = await cli(["cancel", "reused"], stateRoot);
+  assert.equal(cancel.code, 0, cancel.stderr);
+  assert.match(cancel.stdout, /stale/);
+});
+
 function findSingleSessionId(stateRoot) {
   const sessions = fs.readdirSync(path.join(stateRoot, "sessions"));
   assert.equal(sessions.length, 1);
