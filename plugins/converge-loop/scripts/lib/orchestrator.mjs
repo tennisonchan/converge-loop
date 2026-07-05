@@ -249,11 +249,13 @@ export async function runSession({ store, options, stdout, stderr = null, stdin 
     store.writeTranscript(session.id, renderTurn(turn, options.output));
     session.current_turn_index = turnIndex + 1;
     store.writeSession(session);
-    const job = store.loadJob(session.id);
-    if (job) {
-      const jobStatus = job.status === "canceling" ? "canceling" : "running";
-      store.writeJob(session.id, { ...job, status: jobStatus, last_heartbeat_at: nowIso() });
-    }
+    store.withJobsLock(() => {
+      const job = store.loadJob(session.id);
+      if (job) {
+        const jobStatus = job.status === "canceling" ? "canceling" : "running";
+        store.writeJob(session.id, { ...job, status: jobStatus, last_heartbeat_at: nowIso() });
+      }
+    });
     printTurn(stdout, options, turn);
 
     if (parsed.violation) {
