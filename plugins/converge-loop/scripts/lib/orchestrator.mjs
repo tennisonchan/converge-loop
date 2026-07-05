@@ -12,6 +12,7 @@ const WEB_FETCH_SESSION_CAP = 12;
 const WEB_FETCH_TIMEOUT_MS = 15_000;
 const WEB_FETCH_BYTE_CAP = 100_000;
 const WEB_MATERIAL_PROMPT_CHAR_CAP = 12_000;
+const WEB_MATERIAL_PROMPT_TOTAL_CAP = 48_000;
 const TRANSCRIPT_CHAR_CAP = 40_000;
 const TURN_MESSAGE_CHAR_CAP = 8_000;
 
@@ -407,6 +408,7 @@ export async function runSession({ store, options, stdout, stderr = null, stdin 
       const fetched = await fetchSharedWeb({
         requests: control.web_fetch_requests,
         webMaterials,
+        attemptsSoFar: allEvidence.filter((item) => item.kind === "web_fetch").length,
         participant,
         turnIndex,
         env
@@ -593,11 +595,42 @@ function askOperator({ promptStream, stdin, points, turnIndex }) {
   });
 }
 
+function isBlockedIpv4(host) {
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!match) return false;
+  const [a, b] = [Number(match[1]), Number(match[2])];
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+  return false;
+}
+
 function isBlockedWebHost(hostname) {
-  const host = String(hostname || "").toLowerCase();
-  if (["localhost", "0.0.0.0", "[::1]", "::1"].includes(host)) return true;
-  if (/^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host) || /^169\.254\./.test(host)) return true;
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true;
+  let host = String(hostname || "").toLowerCase().replace(/\.$/, "");
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  if (isBlockedIpv4(host)) return true;
+  if (host.startsWith("[") && host.endsWith("]")) host = host.slice(1, -1);
+  if (host.includes(":")) {
+    const v6 = host.split("%")[0];
+    if (v6 === "::" || v6 === "::1") return true;
+    if (/^fe[89ab]/.test(v6)) return true; // link-local fe80::/10
+    if (/^f[cd]/.test(v6)) return true; // ULA fc00::/7
+    const mapped = /^::ffff:(.+)$/.exec(v6);
+    if (mapped) {
+      const tail = mapped[1];
+      if (tail.includes(".")) return isBlockedIpv4(tail);
+      const hextets = tail.split(":");
+      if (hextets.length === 2) {
+        const hi = parseInt(hextets[0], 16);
+        const lo = parseInt(hextets[1], 16);
+        if (Number.isFinite(hi) && Number.isFinite(lo)) {
+          return isBlockedIpv4(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+        }
+      }
+    }
+  }
   return false;
 }
 
@@ -626,42 +659,76 @@ async function fetchWebUrl(rawUrl, env) {
     const check = validateWebUrl(current, env);
     if (!check.ok) return { ok: false, url: current, reason: check.reason };
     const controller = new AbortController();
+    // The timer stays armed through the body read so a slow-loris response
+    // cannot outlive the documented timeout; the byte cap is enforced while
+    // streaming so an oversized body never fully buffers.
     const timer = setTimeout(() => controller.abort(), WEB_FETCH_TIMEOUT_MS);
-    let response;
     try {
-      response = await fetch(check.url, { redirect: "manual", signal: controller.signal });
-    } catch (error) {
+      let response;
+      try {
+        response = await fetch(check.url, { redirect: "manual", signal: controller.signal });
+      } catch (error) {
+        return { ok: false, url: current, reason: redact(error.message || String(error)) };
+      }
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        const location = response.headers.get("location");
+        try {
+          await response.body?.cancel?.();
+        } catch {}
+        if (!location) return { ok: false, url: current, reason: `redirect ${response.status} without location` };
+        current = new URL(location, check.url).toString();
+        continue;
+      }
+      if (!response.ok) {
+        return { ok: false, url: current, reason: `HTTP ${response.status}` };
+      }
+      let text = "";
+      let truncated = false;
+      try {
+        const reader = response.body?.getReader?.();
+        if (reader) {
+          const decoder = new TextDecoder();
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            text += decoder.decode(value, { stream: true });
+            if (text.length >= WEB_FETCH_BYTE_CAP) {
+              truncated = true;
+              try {
+                await reader.cancel();
+              } catch {}
+              break;
+            }
+          }
+          if (!truncated) text += decoder.decode();
+        } else {
+          text = await response.text();
+          truncated = text.length > WEB_FETCH_BYTE_CAP;
+        }
+      } catch (error) {
+        return { ok: false, url: current, reason: redact(error.message || String(error)) };
+      }
+      return {
+        ok: true,
+        url: current,
+        status: response.status,
+        content: truncated ? text.slice(0, WEB_FETCH_BYTE_CAP) : text,
+        truncated
+      };
+    } finally {
       clearTimeout(timer);
-      return { ok: false, url: current, reason: redact(error.message || String(error)) };
     }
-    clearTimeout(timer);
-    if ([301, 302, 303, 307, 308].includes(response.status)) {
-      const location = response.headers.get("location");
-      if (!location) return { ok: false, url: current, reason: `redirect ${response.status} without location` };
-      current = new URL(location, check.url).toString();
-      continue;
-    }
-    if (!response.ok) {
-      return { ok: false, url: current, reason: `HTTP ${response.status}` };
-    }
-    const text = await response.text();
-    const truncated = text.length > WEB_FETCH_BYTE_CAP;
-    return {
-      ok: true,
-      url: current,
-      status: response.status,
-      content: truncated ? text.slice(0, WEB_FETCH_BYTE_CAP) : text,
-      truncated
-    };
   }
   return { ok: false, url: current, reason: "too many redirects" };
 }
 
-async function fetchSharedWeb({ requests, webMaterials, participant, turnIndex, env }) {
+async function fetchSharedWeb({ requests, webMaterials, attemptsSoFar = 0, participant, turnIndex, env }) {
   const seen = new Set(webMaterials.map((item) => item.url));
   const results = [];
   const unique = dedupe(requests).filter((url) => !seen.has(String(url)));
-  const budget = Math.max(0, Math.min(WEB_FETCH_PER_TURN_CAP, WEB_FETCH_SESSION_CAP - webMaterials.length));
+  // Failed attempts count against the session budget too, so refused hosts
+  // cannot be used to probe indefinitely.
+  const budget = Math.max(0, Math.min(WEB_FETCH_PER_TURN_CAP, WEB_FETCH_SESSION_CAP - attemptsSoFar));
   const baseEvidence = () => ({
     at: nowIso(),
     turn_index: turnIndex,
@@ -805,13 +872,26 @@ export function buildTurnPrompt({ options, participant, participants = [], trans
   }
 
   if (webMaterials.length) {
-    sections.push([
-      "Shared web material (fetched by the orchestrator; identical for all participants):",
-      ...webMaterials.map((item) => [
+    const blocks = [];
+    let total = 0;
+    let elided = 0;
+    for (let index = webMaterials.length - 1; index >= 0; index -= 1) {
+      const item = webMaterials[index];
+      const block = [
         `--- BEGIN WEB ${item.url}${item.truncated ? " (truncated)" : ""} ---`,
         String(item.content || "").slice(0, WEB_MATERIAL_PROMPT_CHAR_CAP),
         `--- END WEB ${item.url} ---`
-      ].join("\n"))
+      ].join("\n");
+      if (total + block.length > WEB_MATERIAL_PROMPT_TOTAL_CAP && blocks.length) {
+        elided = index + 1;
+        break;
+      }
+      total += block.length;
+      blocks.unshift(block);
+    }
+    sections.push([
+      `Shared web material (fetched by the orchestrator; identical for all participants)${elided ? ` (the oldest ${elided} elided for length)` : ""}:`,
+      ...blocks
     ].join("\n"));
   }
 
