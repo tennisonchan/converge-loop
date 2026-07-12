@@ -20,6 +20,12 @@ const CLASSIFIERS = [
     test: (_error, message) => /ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|socket hang up|network|fetch failed/i.test(message)
   },
   {
+    category: "capacity",
+    class: "transient",
+    hint: "wait for the reported capacity reset or select another healthy provider identity, then retry the same deliberation.",
+    test: (_error, message) => /\b429\b|session limit|rate limit|usage limit|quota exceeded|capacity exhausted/i.test(message)
+  },
+  {
     category: "auth",
     class: "deterministic",
     hint: "re-authenticate the local CLI (`codex login` or `claude auth login`), then rerun `converge-loop setup`.",

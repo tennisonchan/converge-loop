@@ -59,7 +59,7 @@ function writeLocalCliPair(dir, overrides = {}) {
   const codex = path.join(dir, "codex");
   const claude = path.join(dir, "claude");
   const codexHelp = overrides.codexHelp || "Usage: codex exec --sandbox --cd --ignore-user-config --output-schema --output-last-message --model";
-  const claudeHelp = overrides.claudeHelp || "Usage: claude --print --permission-mode --disallowedTools --output-format --safe-mode --json-schema --model --verbose --include-partial-messages";
+  const claudeHelp = overrides.claudeHelp || "Usage: claude --print --permission-mode --tools --output-format --safe-mode --json-schema --model --verbose --include-partial-messages";
   const codexAuth = overrides.codexAuth ?? "Logged in using ChatGPT\n";
   const claudeAuth = overrides.claudeAuth ?? "{\"loggedIn\":true,\"authMethod\":\"oauth\"}\n";
   const codexAuthExit = overrides.codexAuthExit ?? 0;
@@ -116,6 +116,24 @@ if (args[0] === "auth" && args[1] === "status" && args[2] === "--json") {
   process.stdout.write(${JSON.stringify(claudeAuth)});
   process.exit(${claudeAuthExit});
 }
+${overrides.claudeRequireReadOnlyAllowlist ? `
+const toolsIndex = args.indexOf("--tools");
+if (toolsIndex === -1 || args[toolsIndex + 1] !== "Read,Grep,Glob" || args.includes("--disallowedTools")) {
+  process.stderr.write('Permission deny rule "MultiEdit" matches no known tool — check for typos.\\n');
+  process.exit(1);
+}
+` : ""}
+${overrides.claudeStructuredExitError ? `
+process.stderr.write('Permission deny rule "MultiEdit" matches no known tool — check for typos.\\n');
+process.stdout.write(JSON.stringify({
+  type: "result",
+  is_error: true,
+  api_error_status: 429,
+  result: "You've hit your session limit · resets 3am",
+  terminal_reason: "api_error"
+}) + "\\n");
+process.exit(1);
+` : ""}
 let input = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { input += chunk; });
@@ -368,6 +386,49 @@ test("setup --no-smoke enables from readiness checks without a live exchange", a
   const config = JSON.parse(fs.readFileSync(setup.config_path, "utf8"));
   assert.equal(config.enabled, true);
   assert.equal(config.smoke.requested, false);
+});
+
+test("Claude local adapter exposes only the read-only tool allowlist", async () => {
+  const stateRoot = tempRoot("claude-read-only-allowlist");
+  const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"), { claudeRequireReadOnlyAllowlist: true });
+  const setupHarness = io(stateRoot);
+  setupHarness.env.PATH = `${binDir}${path.delimiter}${setupHarness.env.PATH || ""}`;
+  delete setupHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
+  const setupCode = await runCli(["setup", "--no-smoke", "--json"], setupHarness);
+  assert.equal(setupCode, 0, setupHarness.err.join(""));
+  const setup = JSON.parse(setupHarness.out.join(""));
+  assert.equal(setup.enabled, true);
+  assert.equal(setup.read_only_controls.claude, "tool-allowlist-plan-mode");
+
+  const runHarness = io(stateRoot);
+  runHarness.env.PATH = setupHarness.env.PATH;
+  delete runHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
+  const runCode = await runCli(["run", "--topic", "read-only allowlist", "--scope", "none", "--require-independent", "--json"], runHarness);
+  assert.equal(runCode, 0, runHarness.err.join(""));
+  const result = JSON.parse(runHarness.out.join(""));
+  assert.equal(result.status, "agreed");
+  assert.equal(result.independent_provider_coverage, true);
+});
+
+test("Claude nonzero exits preserve structured provider errors over stderr warnings", async () => {
+  const stateRoot = tempRoot("claude-structured-exit-error");
+  const { binDir } = writeLocalCliPair(path.join(stateRoot, "bin"), { claudeStructuredExitError: true });
+  const setupHarness = io(stateRoot);
+  setupHarness.env.PATH = `${binDir}${path.delimiter}${setupHarness.env.PATH || ""}`;
+  delete setupHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
+  const setupCode = await runCli(["setup", "--no-smoke", "--json"], setupHarness);
+  assert.equal(setupCode, 0, setupHarness.err.join(""));
+
+  const runHarness = io(stateRoot);
+  runHarness.env.PATH = setupHarness.env.PATH;
+  delete runHarness.env.CONVERGE_LOOP_TEST_LOCAL_CLI_FAKE;
+  const runCode = await runCli(["run", "--topic", "structured provider error", "--scope", "none", "--require-independent", "--json"], runHarness);
+  assert.equal(runCode, 0, runHarness.err.join(""));
+  const result = JSON.parse(runHarness.out.join(""));
+  assert.equal(result.status, "blocked");
+  assert.equal(result.blocked_reason, "require_independent");
+  assert.match(result.summary, /session limit/i);
+  assert.match(result.summary, /429/);
 });
 
 test("setup --check-only reports readiness without writing config", async () => {
@@ -2414,6 +2475,10 @@ test("classifyAdapterFailure separates deterministic and transient failures", as
   assert.equal(classifyAdapterFailure(new Error("401 Unauthorized: token_invalidated")).category, "auth");
   assert.equal(classifyAdapterFailure(new Error("invalid_json_schema: Missing 'confidence'")).category, "schema");
   assert.equal(classifyAdapterFailure(new Error("codex missing required read-only flags: --cd")).category, "cli");
+  const capacity = classifyAdapterFailure(new Error("claude reported an error (429): You've hit your session limit · resets 3am"));
+  assert.equal(capacity.category, "capacity");
+  assert.equal(capacity.class, "transient");
+  assert.match(capacity.hint, /reset|identity/i);
   assert.equal(classifyAdapterFailure(new Error("something novel")).class, "transient");
   const auth = classifyAdapterFailure(new Error("401 token_invalidated"));
   assert.equal(auth.class, "deterministic");
