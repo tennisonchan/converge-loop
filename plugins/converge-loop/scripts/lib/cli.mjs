@@ -58,7 +58,7 @@ async function runSetup(args, io) {
       checks: {},
       read_only_controls: {
         codex: "sandbox-read-only",
-        claude: "tool-denylist-plan-mode"
+        claude: "tool-allowlist-plan-mode"
       },
       ...preservedAdapterSettings(readLocalAdapterConfig(io.env))
     };

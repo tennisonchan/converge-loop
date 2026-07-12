@@ -247,7 +247,7 @@ Every adapter declares capabilities before a run:
   "file_scope": ["none", "working-tree", "branch"],
   "web_scope": ["off", "shared"],
   "control_output": ["json-schema", "nonce-block"],
-  "read_only_enforcement": "sandbox-and-tool-denylist",
+  "read_only_enforcement": "sandbox-read-only",
   "observed_evidence": ["file", "web"],
   "timeouts": true
 }
@@ -552,7 +552,7 @@ Build the runtime in risk-ordered slices. Each slice should leave the repo in a 
    - Acceptance: fake tooling proves same-scope file reads, branch scope requires `--base`, and write/patch/commit attempts stop as `blocked`.
 
 4. Real local adapters.
-   - Add Codex and Claude local CLI adapters only after their read-only flags, tool-denylist behavior, timeout behavior, control-output support, and host/opposite selection can be proven in preflight.
+   - Add Codex and Claude local CLI adapters only after their read-only flags, positive tool-allowlist behavior, timeout behavior, control-output support, and host/opposite selection can be proven in preflight.
    - Acceptance: `converge-loop setup` verifies Codex and Claude local CLI read-only controls plus non-model auth status and proves a tiny explicit Codex + Claude smoke exchange before enabling config-backed local adapters by default; `--no-smoke` keeps deterministic/offline readiness-only enablement; `--check-only` is non-mutating; `--disable` turns config-backed adapters off; explicit `--smoke` still refuses fake shortcuts; adapter preflight fails closed when setup has not succeeded or enforcement is unavailable; host aliases normalize correctly; from Codex, default selection pairs Codex with Claude Code; from Claude Code, default selection pairs Claude Code with Codex; background jobs persist normalized `host_agent`; default opposite-agent unavailability can fall back to the host adapter with degraded disclosure unless `--require-independent` is set; explicit `--counterpart`/`--fake-adapters` selections do not fallback implicitly; with available adapters, a minimal foreground two-agent run completes using the same file scope.
 
 5. Shared web scope.

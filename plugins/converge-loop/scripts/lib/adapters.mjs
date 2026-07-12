@@ -11,7 +11,7 @@ const LOCAL_ADAPTER_CONFIG_SCHEMA = "converge-loop.local-adapters.v1";
 // Keep this in sync with LocalCliAdapter.invoke; setup and runtime preflight assert these flags.
 export const LOCAL_CLI_REQUIRED_FLAGS = Object.freeze({
   codex: ["--sandbox", "--cd", "--ignore-user-config", "--output-schema", "--output-last-message", "--model"],
-  claude: ["--print", "--permission-mode", "--disallowedTools", "--output-format", "--safe-mode", "--json-schema", "--model", "--verbose", "--include-partial-messages"]
+  claude: ["--print", "--permission-mode", "--tools", "--output-format", "--safe-mode", "--json-schema", "--model", "--verbose", "--include-partial-messages"]
 });
 
 export const PARTICIPANT_SCHEMA_PATH = fileURLToPath(new URL("../../schemas/participant-output.schema.json", import.meta.url));
@@ -160,7 +160,7 @@ export function checkLocalCliReadiness(env = process.env) {
     config_path: localAdapterConfigPath(env),
     read_only_controls: {
       codex: "sandbox-read-only",
-      claude: "tool-denylist-plan-mode"
+      claude: "tool-allowlist-plan-mode"
     }
   };
 }
@@ -307,7 +307,7 @@ class LocalCliAdapter {
 
   preflight({ options, env }) {
     // Shared web is orchestrator-mediated between turns; provider-native web
-    // stays disabled (claude denylist, codex sandbox), so local CLIs support it.
+    // stays disabled (claude allowlist, codex sandbox), so local CLIs support it.
     if (testUnavailableAdapters(env).includes(this.name)) {
       return { ok: false, reason: `${this.name} adapter forced unavailable by test preflight` };
     }
@@ -337,7 +337,7 @@ class LocalCliAdapter {
         file_scope: ["none", "working-tree", "branch"],
         web_scope: ["off", "shared"],
         control_output: ["json-schema", "nonce-block"],
-        read_only_enforcement: this.name === "codex" ? "sandbox-read-only" : "tool-denylist-plan-mode",
+        read_only_enforcement: this.name === "codex" ? "sandbox-read-only" : "tool-allowlist-plan-mode",
         observed_evidence: [],
         timeouts: true
       }
@@ -386,21 +386,31 @@ class LocalCliAdapter {
     // stream-json keeps output flowing during long turns so the inactivity
     // detector can tell a slow model from a hung one; the final stream line is
     // the same result envelope the buffered json format produces.
-    const stdout = await runWithTimeout(command, [
-      "--safe-mode",
-      "--print",
-      ...(model ? ["--model", model] : []),
-      "--permission-mode",
-      "plan",
-      "--disallowedTools",
-      "Edit,MultiEdit,Write,WebFetch,WebSearch,Bash(git commit *),Bash(git push *),Bash(converge-loop *),Bash(review-loop *)",
-      "--output-format",
-      "stream-json",
-      "--verbose",
-      "--include-partial-messages",
-      "--json-schema",
-      participantSchemaInline()
-    ], prompt, limits, this.env);
+    let stdout;
+    try {
+      stdout = await runWithTimeout(command, [
+        "--safe-mode",
+        "--print",
+        ...(model ? ["--model", model] : []),
+        "--permission-mode",
+        "plan",
+        "--tools",
+        "Read,Grep,Glob",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--include-partial-messages",
+        "--json-schema",
+        participantSchemaInline()
+      ], prompt, limits, this.env);
+    } catch (error) {
+      const envelope = claudeResultEnvelope(error?.stdout);
+      if (envelope?.is_error) {
+        const status = envelope.api_error_status ? ` (${envelope.api_error_status})` : "";
+        throw new Error(`claude reported an error${status}: ${redact(envelope.result || envelope.subtype || "unknown")}`);
+      }
+      throw error;
+    }
     const envelope = claudeResultEnvelope(stdout);
     if (envelope) {
       if (envelope.is_error) {
@@ -699,8 +709,16 @@ function runWithTimeout(command, args, stdin, limits, env = process.env) {
     });
     child.on("close", (code) => {
       clearTimers();
-      if (code === 0) resolve(stdout.trim());
-      else reject(new Error(`${command} failed with code ${code}: ${redact(stderr.trim())}`));
+      if (code === 0) {
+        resolve(stdout.trim());
+        return;
+      }
+      const detail = stderr.trim() || stdout.trim();
+      const error = new Error(`${command} failed with code ${code}: ${redact(detail)}`);
+      error.exitCode = code;
+      error.stdout = stdout;
+      error.stderr = stderr;
+      reject(error);
     });
     if (stdin) child.stdin.end(stdin);
     else child.stdin.end();
