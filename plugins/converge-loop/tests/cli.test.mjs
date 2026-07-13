@@ -802,12 +802,13 @@ test("help presents host-aware run example before fake adapter smoke paths", asy
   assert.doesNotMatch(result.stdout, /fake-sequence,fake-sequence/);
 });
 
-test("codex skill owns codex host identity without exposing old akx setup", () => {
+test("codex skill uses its installed runtime path and owns codex host identity", () => {
   const skill = fs.readFileSync(path.join(repoRoot, "skills/converge-loop/SKILL.md"), "utf8");
   const setupSkill = fs.readFileSync(path.join(repoRoot, "skills/converge-loop-setup/SKILL.md"), "utf8");
-  assert.match(skill, /CONVERGE_LOOP_HOST=codex converge-loop run/);
-  assert.match(skill, /CONVERGE_LOOP_HOST=codex converge-loop setup/);
+  assert.match(skill, /CONVERGE_LOOP_HOST=codex node "<skill-root>\/\.\.\/\.\.\/scripts\/bin\/converge-loop\.mjs" run/);
+  assert.match(skill, /CONVERGE_LOOP_HOST=codex node "<skill-root>\/\.\.\/\.\.\/scripts\/bin\/converge-loop\.mjs" setup/);
   assert.match(skill, /CONVERGE_LOOP_HOST=codex node scripts\/bin\/converge-loop\.mjs run/);
+  assert.doesNotMatch(skill, /CONVERGE_LOOP_HOST=codex converge-loop (?:setup|run)/);
   assert.match(skill, /CLAUDE_PLUGIN_ROOT/);
   assert.match(skill, /converge-loop setup/);
   assert.match(setupSkill, /converge-loop\.mjs" setup/);

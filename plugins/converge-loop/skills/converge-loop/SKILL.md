@@ -17,8 +17,8 @@ Use this skill when the user wants agents to reason together before execution or
 The plugin includes a Node.js command runtime. From Codex, invoke it with the Codex host identity:
 
 ```bash
-CONVERGE_LOOP_HOST=codex converge-loop setup
-CONVERGE_LOOP_HOST=codex converge-loop run --topic "Decide the retention default for exported sessions"
+CONVERGE_LOOP_HOST=codex node "<skill-root>/../../scripts/bin/converge-loop.mjs" setup
+CONVERGE_LOOP_HOST=codex node "<skill-root>/../../scripts/bin/converge-loop.mjs" run --topic "Decide the retention default for exported sessions"
 ```
 
 From the plugin source, invoke the same runtime directly:
