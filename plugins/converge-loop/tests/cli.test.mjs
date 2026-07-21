@@ -1075,15 +1075,18 @@ test("resume continues from an allowed terminal state", async () => {
   assert.equal(readResult(stateRoot, sessionId).status, "agreed");
   const session = JSON.parse(fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "session.json"), "utf8"));
   assert.equal(session.options.scope, "working-tree");
+  assert.equal(session.options.minTurns, 4);
   assert.equal(session.options.maxTurns, 8);
 });
 
-test("agreed on the first participant turn still waits for the second participant", async () => {
+test("agreement waits for the four-turn minimum", async () => {
   const stateRoot = tempRoot("minturn");
   const fixture = writeFixture(stateRoot, {
     turns: [
       { message: "premature", control: { status: "agreed", agreements: ["early"], ready_to_converge: true } },
-      { message: "confirmed", control: { status: "agreed", agreements: ["confirmed"], ready_to_converge: true } }
+      { message: "confirmed early", control: { status: "agreed", agreements: ["confirmed"], ready_to_converge: true } },
+      { message: "pressure-tested", control: { status: "agreed", improvements: ["checked assumptions"], ready_to_converge: true } },
+      { message: "confirmed after minimum", control: { status: "agreed", agreements: ["final"], ready_to_converge: true } }
     ]
   });
   const result = await cliFakes("fake-replay,fake-replay", [
@@ -1095,7 +1098,7 @@ test("agreed on the first participant turn still waits for the second participan
   ], stateRoot);
   const parsed = JSON.parse(result.stdout);
   assert.equal(parsed.status, "agreed");
-  assert.equal(parsed.turn_count, 2);
+  assert.equal(parsed.turn_count, 4);
 });
 
 test("local cli adapters accept shared web scope with orchestrator mediation", async () => {
@@ -1454,7 +1457,9 @@ test("turn prompt carries safety preamble, materials, transcript, and convergenc
   assert.match(prompt, /proposal detail/);
   assert.match(prompt, /improvements: improve X/);
   assert.match(prompt, /minor_reservations/);
-  assert.match(prompt, /counterpart is ready to converge/i);
+  assert.match(prompt, /counterpart is provisionally ready to converge/i);
+  assert.match(prompt, /minimum of 4 turns/i);
+  assert.match(prompt, /pressure-test/i);
   assert.match(prompt, /<<<CONVERGE_LOOP_CONTROL abc123>>>/);
 
   const schemaPrompt = buildTurnPrompt({
@@ -1650,7 +1655,9 @@ test("exhausted control repairs record the raw reply and end without progress", 
   const fixture = writeFixture(stateRoot, {
     turns: [
       { attempts: ["still no control block", "still no control block either"] },
-      { attempts: ["nothing parseable", "nothing parseable again"] }
+      { attempts: ["nothing parseable", "nothing parseable again"] },
+      { attempts: ["still malformed", "still malformed again"] },
+      { attempts: ["finally still malformed", "finally still malformed again"] }
     ]
   });
   const result = await cliFakes("fake-replay,fake-replay", [
@@ -1986,7 +1993,7 @@ test("resume repairs a torn trailing turn record before appending new turns", as
   assert.equal(readResult(stateRoot, sessionId).status, "agreed");
   const lines = fs.readFileSync(turnsPath, "utf8").split(/\n/).filter(Boolean);
   for (const line of lines) JSON.parse(line);
-  assert.equal(lines.length, 3);
+  assert.equal(lines.length, 4);
   const transcript = fs.readFileSync(path.join(stateRoot, "sessions", sessionId, "transcript.md"), "utf8");
   assert.doesNotMatch(transcript, /supplied on resume/, "plain resume must not fabricate evidence disclosures");
 });

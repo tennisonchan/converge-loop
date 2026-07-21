@@ -314,11 +314,13 @@ The session can end as:
 - `max_turns`: configured turn cap reached.
 - `timeout`: wall-clock cap reached.
 
-`agreed` requires every active participant to converge on the core issue. A participant's `status: "agreed"` (or `ready_to_converge: true`) is a participant-level signal, never session-terminal by itself. The session ends `agreed` only when every participant's latest control is converged: `ready_to_converge` is true and it carries no core `pushbacks`, no pending `evidence_requests`, and no `operator_intervention_points`. Participants may converge while keeping `minor_reservations` — smaller disagreements they can live with — and those are disclosed in the result rather than blocking agreement. A participant who declares `agreed` while still listing core pushbacks has not converged.
+`agreed` requires every active participant to converge on the core issue and at least 4 participant turns to complete. A participant's `status: "agreed"` (or `ready_to_converge: true`) is a participant-level signal, never session-terminal by itself. The session ends `agreed` only after the minimum turn count and when every participant's latest control is converged: `ready_to_converge` is true and it carries no core `pushbacks`, no pending `evidence_requests`, and no `operator_intervention_points`. Participants may converge while keeping `minor_reservations` — smaller disagreements they can live with — and those are disclosed in the result rather than blocking agreement. A participant who declares `agreed` while still listing core pushbacks has not converged.
 
 If a participant asks for evidence during convergence, the session moves back to discussion or ends as `needs_evidence`; it does not finalize while an unresolved evidence request could materially change the conclusion.
 
 The orchestrator, not the participants, adjudicates materiality for stopping. A pushback is core when it would change the conclusion, invalidate an assumption, add a meaningful option, identify a non-trivial risk, request evidence that could change the decision, or expose a requirement conflict; anything a participant can live with belongs in `minor_reservations`. When a counterpart is already ready to converge, the next turn prompt explicitly asks the non-ready participant: "Do you have any material pushback, missing evidence, or better option that would change the conclusion?" If the answer contains only restated resolved points, style preferences, or non-actionable caveats, the participant should converge with minor reservations. If the answer contains new core pushback or an evidence request, the loop returns to discussion or ends as `needs_evidence`.
+
+Before the 4-turn minimum is met, provisional agreement keeps the loop running and the prompt asks participants to pressure-test the strongest remaining assumption, evidence gap, risk, or alternative without manufacturing disagreement. Agreement and no-progress respect the minimum; operational exits such as `needs_evidence`, `operator_intervention`, `blocked`, timeout, and cancellation remain immediate. An explicit lower `--max-turns` still ends as `max_turns` rather than manufacturing additional dialogue.
 
 ## Loop Policy
 
@@ -327,6 +329,7 @@ Wall-clock and turn budgets are kept coherent so a session does not systematical
 
 Default limits:
 
+- 4 participant turns before agreement or no-progress
 - `--max-turns 8`
 - `--max-minutes 30`
 - `--turn-timeout-seconds 420`
@@ -338,7 +341,7 @@ The turn timeout is an absolute hang bound, not an expected turn length: deliber
 
 Every invoke attempt is additionally bounded by an orchestrator-level timeout of `--turn-timeout-seconds`, independent of any timeout the adapter enforces internally, so a hung adapter cannot stall the loop. A turn that hits either the absolute cap or the inactivity bound is retried once on the same adapter with both windows doubled (a slow model is not a broken adapter) before invoke-time fallback applies. No retry or fallback attempt starts after the `--max-minutes` deadline has passed, which bounds wall-clock overshoot to at most the attempt already in flight. Adapter error text is redacted for common secret shapes before it is persisted to results or transcripts.
 
-Progress is measured against the same participant's previous control: a turn counts as progress only when it adds a new pushback, minor reservation, improvement, evidence citation, evidence request, concession, answered question, status change, or readiness change relative to that participant's prior turn. Restating the same positions verbatim is not movement, and a full round without new movement stops the loop.
+Progress is measured against the same participant's previous control: a turn counts as progress only when it adds a new pushback, minor reservation, improvement, evidence citation, evidence request, concession, answered question, status change, or readiness change relative to that participant's prior turn. Restating the same positions verbatim is not movement, and once the 4-turn minimum is met, a full round without new movement stops the loop.
 
 The no-progress stop should produce `clear_disagreement` when the disagreement is actionable, or `blocked` when the system cannot tell what would move the conversation forward.
 

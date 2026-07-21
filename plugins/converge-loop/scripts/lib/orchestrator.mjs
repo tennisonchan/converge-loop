@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import readline from "node:readline";
-import { RESULT_SCHEMA } from "./constants.mjs";
+import { DEFAULT_RUN_OPTIONS, RESULT_SCHEMA } from "./constants.mjs";
 import { buildParticipants, getAdapter, preflightParticipants, providerFor } from "./adapters.mjs";
 import { hasNewProgress, isConverged, normalizeControl, parseParticipantOutput } from "./control.mjs";
 import { nowIso, redact, sha256 } from "./util.mjs";
@@ -26,6 +26,13 @@ const PARTICIPANT_TERMINAL_STATUSES = new Set([
   "operator_intervention",
   "blocked"
 ]);
+
+function effectiveMinimumTurns(options) {
+  return Math.min(
+    options.minTurns ?? DEFAULT_RUN_OPTIONS.minTurns,
+    options.maxTurns ?? DEFAULT_RUN_OPTIONS.maxTurns
+  );
+}
 
 export async function runSession({ store, options, stdout, stderr = null, stdin = null, env, sessionId = null, resume = false, resumeOverrides = null, signal = null }) {
   let participants = resume
@@ -72,6 +79,7 @@ export async function runSession({ store, options, stdout, stderr = null, stdin 
   writeFallbackDisclosure({ store, session, participants, active: preflight.ok });
 
   const priorTurns = store.readTurns(session.id);
+  const minimumTurns = effectiveMinimumTurns(options);
   const latestControls = new Map();
   for (const priorTurn of priorTurns) {
     latestControls.set(priorTurn.participant_id, normalizeControl(priorTurn.control));
@@ -439,7 +447,8 @@ export async function runSession({ store, options, stdout, stderr = null, stdin 
       break;
     }
 
-    if (latestControls.size === participants.length && participants.every((entry) => isConverged(latestControls.get(entry.id)))) {
+    const minimumTurnsReached = turnIndex + 1 >= minimumTurns;
+    if (minimumTurnsReached && latestControls.size === participants.length && participants.every((entry) => isConverged(latestControls.get(entry.id)))) {
       const minor = dedupe([...latestControls.values()].flatMap((entry) => entry.minor_reservations));
       result = buildResult({
         session,
@@ -461,7 +470,7 @@ export async function runSession({ store, options, stdout, stderr = null, stdin 
 
     if (!hasNewProgress(control, previousControl)) noProgressCount += 1;
     else noProgressCount = 0;
-    if (noProgressCount >= participants.length) {
+    if (minimumTurnsReached && noProgressCount >= participants.length) {
       const unresolvedCore = dedupe([...latestControls.values()].flatMap((entry) => entry.pushbacks));
       result = buildResult({
         session,
@@ -932,6 +941,8 @@ function loadMaterial(materialPath) {
 }
 
 export function buildTurnPrompt({ options, participant, participants = [], transcript = [], nonce, controlMode = "nonce-block", materials = { artifact: null, context: null }, latestControls = new Map(), operatorInputs = [], webMaterials = [] }) {
+  const minimumTurns = effectiveMinimumTurns(options);
+  const minimumTurnsReached = transcript.length + 1 >= minimumTurns;
   const others = participants.filter((entry) => entry.id !== participant.id);
   const counterparts = others.map((entry) => `${entry.role} (${entry.adapter})`).join(", ") || "none";
   const someoneElseConverged = others.some((entry) => {
@@ -1015,6 +1026,7 @@ export function buildTurnPrompt({ options, participant, participants = [], trans
     "- pushbacks: core, big-picture blockers that must change the conclusion. Only list a pushback when it is material.",
     "- minor_reservations: smaller disagreements you can live with. They do not block convergence and are disclosed in the final result.",
     "- Set ready_to_converge=true when you agree with the core direction even if minor reservations remain.",
+    `- Normal deliberation runs have a minimum of ${minimumTurns} turns before agreement or no-progress. Until then, use each turn to pressure-test the strongest remaining assumption, evidence gap, risk, or alternative instead of merely repeating agreement.`,
     "- Use evidence_requests when missing evidence could change the conclusion.",
     "- Respond directly to the other participant's latest points; do not restate your previous turn."
   ];
@@ -1022,7 +1034,9 @@ export function buildTurnPrompt({ options, participant, participants = [], trans
     convergenceLines.push(`- Web scope is shared: list up to ${WEB_FETCH_PER_TURN_CAP} public http(s) URLs in web_fetch_requests and the orchestrator will fetch them (size-capped) for everyone before the next turn. Provider-native web tools are disabled.`);
   }
   if (someoneElseConverged) {
-    convergenceLines.push("- Your counterpart is ready to converge. State any remaining MATERIAL pushback, missing evidence, or better option that would change the conclusion; otherwise set ready_to_converge=true and move livable concerns into minor_reservations.");
+    convergenceLines.push(minimumTurnsReached
+      ? "- Your counterpart is ready to converge. State any remaining MATERIAL pushback, missing evidence, or better option that would change the conclusion; otherwise set ready_to_converge=true and move livable concerns into minor_reservations."
+      : "- Your counterpart is provisionally ready to converge, but the minimum turn count is not yet met. Use this turn to pressure-test the strongest remaining assumption, evidence gap, risk, or alternative; do not manufacture disagreement.");
   }
   sections.push(convergenceLines.join("\n"));
 
