@@ -544,7 +544,7 @@ Build the runtime in risk-ordered slices. Each slice should leave the repo in a 
 
 1. Command skeleton and fake loop.
    - Add `package.json`, `scripts/bin/converge-loop.mjs`, CLI parser, `run/status/result/cancel/resume` stubs, state directory resolution, and fake adapter support.
-   - Acceptance: `converge-loop run --fake-adapters fake-sequence,fake-sequence --topic ...` executes a two-turn foreground loop, persists session files with schema versions, and `result <id>` prints the normalized result.
+   - Acceptance: `converge-loop run --fake-adapters fake-sequence,fake-sequence --topic ...` executes a bounded foreground loop, persists session files with schema versions, and `result <id>` prints the normalized result.
 
 2. Control contract and stopping policy.
    - Implement schema-bound control parsing, nonce fallback parsing, retry behavior, progress heuristic, materiality adjudication, convergence attempt, terminal statuses, and compact output.
