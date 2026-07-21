@@ -76,7 +76,7 @@ Each local CLI participant uses its CLI's default model unless overridden. Per r
 
 Turn budgets: `--turn-timeout-seconds` (default 420) is an absolute per-turn cap, and `--turn-inactivity-seconds` (default 120, 0 disables) kills a turn whose CLI streams no output at all — a hung adapter dies fast while a slow-but-streaming model keeps its full window. A turn that hits either limit is retried once with both windows doubled before fallback handling applies, and no new attempt starts past `--max-minutes`. Large default models can need most of the timeout window for a deliberation turn; picking a faster model is usually the better fix than raising the cap.
 
-The default dialogue cap is `--max-turns 8`. Keep broad topics focused first; raise `--max-turns` when one deliberation must cover several material issues, evidence exchange, or multiple rounds of negotiation.
+Normal deliberation runs complete at least 4 participant turns before agreement or no-progress, with a default cap of `--max-turns 8`. The extra turns pressure-test the strongest remaining assumption, evidence gap, risk, or alternative without manufacturing disagreement. Keep broad topics focused first; raise `--max-turns` when one deliberation must cover several material issues, evidence exchange, or multiple rounds of negotiation.
 
 ## Verification
 

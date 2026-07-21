@@ -29,6 +29,7 @@ export const DEFAULT_RUN_OPTIONS = Object.freeze({
   scope: "working-tree",
   web: "off",
   output: "compact",
+  minTurns: 4,
   maxTurns: 8,
   maxMinutes: 30,
   // Absolute per-turn cap. Deliberation turns on large models routinely run
